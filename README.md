@@ -4,7 +4,9 @@ A graphical node-edge graph editor, in Python and Qt (PySide6). Currently very m
 <img width="416" height="306" alt="image" src="https://github.com/user-attachments/assets/3003b49e-4625-4cc3-91b0-0da034a61bbc" />
 </p>
 <p align="centre">
-The interface - an (editable) object list on the left, and the editable graph on the right. Tools on the top.
+The interface - an (editable) object list on the left, and the editable graph on the right. Tools on the top. 
+            
+The black circle adds **Nodes (shortcut - "N"),** the tracks add **Edges ("E")** The pointer goes into select mode. Double click the text in the list to edit names. Selection in one window shows in the other. I _think_ the menu options are self explanatory?
 </p>
 
 This is a prototype and learning project. My primary goal is to learn Qt/ Pyside, and to figure out the patterns needed to support model (repository) -based, multi-graphical view higraphs. I have some blog posts about the project [here](https://isijingi.co.za/wp/category/higraph/)
