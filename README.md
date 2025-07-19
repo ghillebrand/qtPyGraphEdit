@@ -1,12 +1,20 @@
 # qtPyGraphEdit
-A graphical node-edge graph editor, in Python and Qt (PySide6)
+A graphical node-edge graph editor, in Python and Qt (PySide6). Currently very much in development, in a pre-alpha state.
+<p align="centre">
+<img width="416" height="306" alt="image" src="https://github.com/user-attachments/assets/3003b49e-4625-4cc3-91b0-0da034a61bbc" />
+</p>
+<p align="centre">
+The interface - an (editable) object list on the left, and the editable graph on the right. Tools on the top.
+</p>
 
 This is a prototype and learning project. My primary goal is to learn Qt/ Pyside, and to figure out the patterns needed to support model (repository) -based, multi-graphical view higraphs. I have some blog posts about the project [here](https://isijingi.co.za/wp/category/higraph/)
+
+Given that there seem to be very few (no?) _graphical_ graph editors, it is possible that someone may see the utility in taking this rolling chassis, and turning it into a graphical front-end for something like `networkx`. Since this has a (rudimentary) live Python scripting window, it can be extended to support command line and GUI interactions.
 
 ## V0 is a simple node-edge graph editor
 
 Goal: Build a basic PySide6 framework for a model-viewController, with a truly independent Graph model
-This is currently based on a simple [custom Graph library](https://github.com/ghillebrand/) , which will be extended to higraphs in V1. One could use `networkx` or an equivalent at this point, but it doesn't support higraphs, so the work will have to be done sooner or later.
+This is currently based on a simple [custom Graph library](https://github.com/ghillebrand/qtPyGraphEdit/blob/main/src/coreGraph.py), which will be extended to higraphs in V1. One could use `networkx` or an equivalent at this point, but it doesn't support higraphs, so the work will have to be done sooner or later.
 
 V0.0
 - Dictionary of nodes and edges with meta data. 
