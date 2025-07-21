@@ -11,7 +11,7 @@ The black circle adds **Nodes (shortcut - "N"),** the tracks add **Edges ("E")**
 
 This is a prototype and learning project. My primary goal is to learn Qt/ Pyside, and to figure out the patterns needed to support model (repository) -based, multi-graphical view higraphs. I have some blog posts about the project [here](https://isijingi.co.za/wp/category/higraph/)
 
-Given that there seem to be very few (no?) _graphical_ graph editors, it is possible that someone may see the utility in taking this rolling chassis, and turning it into a graphical front-end for something like `networkx`. Since this has a (rudimentary) live Python scripting window, it can be extended to support command line and GUI interactions.
+Given that there seem to be very few (no?) _graphical_ graph editors in Python, it is possible that someone may see the utility in taking this rolling chassis, and turning it into a graphical front-end for something like `networkx`. Since this has a (rudimentary) live Python scripting window, it can be extended to support command line and GUI interactions.
 
 ## V0 is a simple node-edge graph editor
 
