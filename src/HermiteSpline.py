@@ -7,7 +7,7 @@ from typing import List, Dict
 
 from PySide6.QtWidgets import (QMainWindow, QGraphicsScene, QGraphicsView, QApplication, 
                                QGraphicsObject, QGraphicsEllipseItem, QGraphicsItem, QGraphicsTextItem )
-from PySide6.QtGui import QPainter, QPainterPath, QPen, QBrush, QColor, QPen, QPainterPathStroker
+from PySide6.QtGui import QPainter, QPainterPath, QPen, QBrush, QColor, QPainterPathStroker
 from PySide6.QtCore import QRectF, QPointF, Qt
 
 import sys
@@ -71,33 +71,37 @@ class HermiteSplineItem(QGraphicsObject):
         self.suppressItemChange = True
         self._p = p
         
+        #How many lines per segment
+        self.linesPerSegment = 40
+
         #Tangents
+        self.scaleFactor = 20 #how long the default tangents are
         #Are tangents given:
         if len(t) == len(p):
             self._t = t
         elif len(t) == 0:
             #Compute default tangents for each point.
             self._t = [0 for _ in range(len(self._p))]
-            scaleFactor = 20 #how long the default tangents are
+            
 
             #Start and end: Just aim for the next point (also deals with 2 pt case)
             hyp = math.sqrt((self._p[0].x() - self._p[1].x())**2 +(self._p[0].y() - self._p[1].y())**2 )
-            dx = (self._p[1].x() - self._p[0].x())/hyp * scaleFactor
-            dy = (self._p[1].y() - self._p[0].y())/hyp * scaleFactor
+            dx = (self._p[1].x() - self._p[0].x())/hyp * self.scaleFactor
+            dy = (self._p[1].y() - self._p[0].y())/hyp * self.scaleFactor
             self._t[0] = (0,QPointF(dx,dy))
 
             #End
             hyp = math.sqrt((self._p[-1].x() - self._p[-2].x())**2 +(self._p[-1].y() - self._p[-2].y())**2 )
-            dx = (self._p[-1].x() -self._p[-2].x())/hyp * scaleFactor
-            dy = (self._p[-1].y() -self._p[-2].y())/hyp * scaleFactor
+            dx = (self._p[-1].x() -self._p[-2].x())/hyp * self.scaleFactor
+            dy = (self._p[-1].y() -self._p[-2].y())/hyp * self.scaleFactor
             self._t[-1] = (QPointF(dx,dy),0)
 
             #MultiPoint
             for i in range(1,len(self._p)-1):
                 hyp = math.sqrt((self._p[i-1].x() - self._p[i+1].x())**2 +(self._p[i-1].y() - self._p[i+1].y())**2 )
-                dx = (self._p[i-1].x() -self._p[i+1].x())/hyp * scaleFactor
-                dy = (self._p[i-1].y() -self._p[i+1].y())/hyp * scaleFactor
-                self._t[i] = (-QPointF(dx,dy),-QPointF(dx,dy))                
+                dx = (self._p[i+1].x() - self._p[i-1].x())/hyp * self.scaleFactor
+                dy = (self._p[i+1].y() - self._p[i-1].y())/hyp * self.scaleFactor
+                self._t[i] = (QPointF(dx,dy),QPointF(dx,dy))                
 
         else:
             print("Must have tangents set!!!")
@@ -120,6 +124,73 @@ class HermiteSplineItem(QGraphicsObject):
         #Create the editing handles
         #self._createHandles()
         #self._deleteHandles()
+
+    def __repr__(self):
+        #tuple formatted, can be fed into constructor
+        return str(f"({self._p},\n{self._t})")
+
+    def addPoint(self,newP:QPointF):
+        """ Add a control point into the spline at newP"""
+        #Find which points it's between
+        
+        minD = math.inf #infinite distance
+        ic, xc, yc = 0,0,0
+        for i in range(self._path.elementCount()):
+            xo, yo = self._path.elementAt(i).x, self._path.elementAt(i).y
+            newD = math.sqrt((newP.x() - xo)**2+ (newP.y() - yo)**2)
+            if newD < minD:
+                ic, xc, yc = i,xo,yo
+                minD = newD
+        #TODO: This requires a fixed num of lines/ segment - make it a constant
+        i = ic // self.linesPerSegment
+
+        #Calc the tangents using the previous and next segment points (not spline knots)
+        xl = self._path.elementAt(ic-1).x
+        yl = self._path.elementAt(ic-1).y
+        xr = self._path.elementAt(ic+1).x
+        yr = self._path.elementAt(ic+1).y
+        hyp = math.sqrt((xr-xl)**2 + (yr-yl)**2 )
+        dx = (xr-xl)/hyp * self.scaleFactor
+        dy = (yr-yl)/hyp * self.scaleFactor
+        #Add to the lists
+        self._p.insert(i+1,QPointF(xc,yc))
+        self._t.insert(i+1,(QPointF(dx,dy), QPointF(dx,dy)))
+        self.update()
+
+    def deletePoint(self,delP:QPointF):
+        """Delete the control point nearest delP"""
+        minD = math.inf
+        ic, xc, yc = 0,0,0
+        for i in range(len(self._p)):
+            xo, yo = self._p[i].x(), self._p[i].y()
+            newD = math.sqrt((delP.x() - xo)**2+ (delP.y() - yo)**2)
+            if newD < minD:
+                ic, xc, yc = i,xo,yo
+                minD = newD
+
+        self.suppressItemChange = True
+        #remove handles 
+        #Not first point
+        if ic != 0:
+            self.scene().removeItem(self._tHandles[ic][1])
+        #Not last point
+        if ic != len(self._p):
+            self.scene().removeItem(self._tHandles[ic][0])
+        self._tHandles.pop(ic)
+
+        #remove tangents
+        self._t.pop(ic)
+
+        #remove point
+        #self._pHandles[ic].suppressItemChange = True
+        self.scene().removeItem(self._pHandles[ic])
+        self._pHandles.pop(ic)
+        self._p.pop(ic)
+
+        self.suppressItemChange = False
+        #redraw
+        self._updateFromHandles(delP)
+        self.update()
 
     def _createHandles(self):
         """create handles on single selection, in called from itemChange()"""
@@ -242,9 +313,6 @@ class HermiteSplineItem(QGraphicsObject):
     def _createHermitePath(self) -> QPainterPath:
         """ compute the new curve """
 
-        #TODO: Make this dynamic based on tangent direction/ mag? Does it _need_ optimising?
-        steps = 40
-
         #First iteration of dynamic steps calculation.
         #p0p1:float = math.sqrt((self._p[0].x() - self._p[-1].x())**2 +(self._p[0].y() - self._p[-1].y())**2 )
         #steps = int(p0p1/10) #This doesn't deal with big tangents. Needs some more maths!
@@ -258,8 +326,8 @@ class HermiteSplineItem(QGraphicsObject):
             t0 = self._t[seg][1]    #right tangent
             t1 = self._t[seg+1][0]  #left
             
-            for i in range(1, steps + 1):
-                t = i / steps
+            for i in range(1, self.linesPerSegment + 1):
+                t = i / self.linesPerSegment
                 pt = self._hermiteInterp(p0,t0,p1,t1,t)
                 path.lineTo(pt)
 
@@ -271,8 +339,9 @@ class HermiteSplineItem(QGraphicsObject):
         h10 = t**3 - 2 * t**2 + t
         h01 = -2 * t**3 + 3 * t**2
         h11 = t**3 - t**2
-
-        tension = 4 #accentuate the magnitude of the tangent
+        
+        #accentuate the magnitude of the tangent
+        tension = 4 
 
         x = ( h00 * p0.x() + h10 * t0.x() * tension
             + h01 * p1.x() + h11 * t1.x() * tension  )
@@ -281,72 +350,3 @@ class HermiteSplineItem(QGraphicsObject):
             
         return QPointF(x, y)
 
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.scene = QGraphicsScene(self)
-        self.view = QGraphicsView(self.scene)
-        self.setCentralWidget(self.view)
-
-        #Don't confuse the tangents with vectors! The tangents point in the direction of `t`
-        #2 point
-        spline2 = HermiteSplineItem( [QPointF(150, 400), QPointF(250, 400)],        #points
-                                    [(0,QPointF(50, -50)),  (QPointF(50, -50),0)]   #tangents (0's for outer, undefined tangents)
-        )
-        self.scene.addItem(spline2)
-
-        #2pt, no tangents given
-        spline2nt = HermiteSplineItem( [QPointF(450, 100), QPointF(550, 150)])
-        self.scene.addItem(spline2nt)
-
-        #3 point
-        spline3 = HermiteSplineItem( [QPointF(250, 300),     QPointF(400,330),                  QPointF(550, 300)], #points
-                                    [(0,QPointF(50, -50)), (QPointF(10,10),QPointF(10,10)), (QPointF(50, -50),0)] #tangents
-        )
-        self.scene.addItem(spline3)
-        spline3.pen = QPen(Qt.blue, 1)
-
-        #4 point
-        spline4 = HermiteSplineItem([   QPointF(100, 200),   #points
-                                        QPointF(150,150), 
-                                        QPointF(210,290), 
-                                        QPointF(300, 200)
-                                     ], 
-                                    [   (0,QPointF(20, -40)),  #tangents
-                                        (QPointF(10,10), QPointF(10,10)), 
-                                        (QPointF(20,20), QPointF(20,20)), 
-                                        (QPointF(50, 50),0)
-                                    ] 
-        )
-        self.scene.addItem(spline4)
-        spline4.pen = QPen(Qt.red, 1)
-
-        #3 point, no tangents
-        spline5 = HermiteSplineItem([QPointF(500, 100),QPointF(550,50), QPointF(600,100)])
-        self.scene.addItem(spline5)
-        spline5.pen = QPen(Qt.green, 1)
-
-        #5 point, no tangents
-        spline5 = HermiteSplineItem([QPointF(500, 400),QPointF(550,550), QPointF(600,450), QPointF(650,550),QPointF(700,400)])
-        self.scene.addItem(spline5)
-
-        #3 point, 'backwards'
-        splineb3 = HermiteSplineItem([QPointF(400,550), QPointF(350,600), QPointF(200,550)])
-        self.scene.addItem(splineb3)
-
-        instructions = QGraphicsTextItem("Click a curve to edit it")
-        instructions.setPos(0,0)
-        self.scene.addItem(instructions)
-
-        self.scene.setSceneRect(QRectF(0, 0, 800, 600))
-        self.view.setRenderHint(QPainter.Antialiasing)
-        self.view.setDragMode(QGraphicsView.RubberBandDrag)
-        self.setWindowTitle("Hermite Spline Editor")
-        self.resize(900, 700)
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    win = MainWindow()
-    win.show()
-    sys.exit(app.exec())
