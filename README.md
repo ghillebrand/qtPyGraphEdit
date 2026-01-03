@@ -42,7 +42,7 @@ V0.3
 - Multiple tabs - editable views of different subsets of the master Graph model 
 - Text display and edit for extended metadata
 
-# Getting Started with editing
+# Getting Started with editing the code
 If you are totally new to Qt (or PySide, the Python version used here), this is a [good tutorial](www.pythonguis.com/tutorials/pyside6-qgraphics-vector-graphics/)
 
 Otherwise, 
