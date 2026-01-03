@@ -1,9 +1,14 @@
 # qtPyGraphEdit
 A graphical node-edge graph editor, in Python and Qt (PySide6). Currently very much in development, in a pre-alpha state.
 <p align="centre">
-<img width="416" height="306" alt="image" src="https://github.com/user-attachments/assets/3003b49e-4625-4cc3-91b0-0da034a61bbc" />
+<img width="205" height="153" alt="image" src="https://github.com/user-attachments/assets/3003b49e-4625-4cc3-91b0-0da034a61bbc" />  V0.0.0
+            <br>
+<img width="500" height="380" alt="image" src="https://github.com/user-attachments/assets/7067d275-d660-45f1-a077-92cf5cff30dd" /> V0.1.0
+
 </p>
 <p align="centre">
+            
+
 The interface - an (editable) object list on the left, and the editable graph on the right. Tools on the top. 
             
 The black circle adds **Nodes (shortcut - "N"),** the tracks add **Edges ("E")** The pointer goes into select mode. Double click the text in the list to edit names. Selection in one window shows in the other. I _think_ the menu options are self explanatory?
@@ -18,7 +23,7 @@ Given that there seem to be very few (no?) _graphical_ graph editors in Python, 
 Goal: Build a basic PySide6 framework for a model-viewController, with a truly independent Graph model
 This is currently based on a simple [custom Graph library](https://github.com/ghillebrand/qtPyGraphEdit/blob/main/src/coreGraph.py), which will be extended to higraphs in V1. One could use `networkx` or an equivalent at this point, but it doesn't support higraphs, so the work will have to be done sooner or later.
 
-V0.0
+### V0.0
 - Dictionary of nodes and edges with meta data. 
 - Displayed in a text list and graphically
 - Edit the graph - add, delete, edit text for nodes & edges, move nodes, reroute edges. 
@@ -29,18 +34,32 @@ V0.0
 
 _Currently, V00 has a bug on deleting an edge, such that quite often, but not always, the edge is removed from the data structures, but the Qt Scene still draws it._
 
-**TODO:**
+### V0.1
+There has been quite a lot of refactoring of the code. the `yEd` library, which was an invaluable stepping stone for persistence in V00 has been replaced with internal XML read/ write code. As I begin to understand Qt better, I fix things. There are still ~70 `TODO`s, but a number have been dealt with, and many are reminders for future versions.
 
-V0.1
-- Hermite splines for edges - based around [this code](https://github.com/vedantyadu/Hermite-cubic-spline)
-- Multipoint edges
+- Hermite splines for edges - based around [this code](https://github.com/vedantyadu/Hermite-cubic-spline). I _really_ think Bezier splines are an ugly way to edit curves. 
+- Multipoint edges - all edges can have multiple bend points.
+- Edges are editable, and can be directed or undirected, and rectilinear or spline. Only one sort of arrow-head at this point!
+- Text display and edit for extended metadata (was in V0.3, but got moved here)
+- Models still round-trip to yEd, but metadata currently does not pull through, and the Hermite spline points become Bezier control points, so the curves look different. 
+  
+<img width="790" height="288" alt="image" src="https://github.com/user-attachments/assets/f4eed419-bfc9-46fb-839a-f9479e16bd38" />
 
-V0.2
-- Hyperedges
+The editing dialog. It is simple and functional - I'm still working out how to use Qt!
+
+## TODO:
+
+### V0.2
+- Hyperedges - n-ended edges. 
             
-V0.3
+### V0.3
 - Multiple tabs - editable views of different subsets of the master Graph model 
-- Text display and edit for extended metadata
+
+### V0.4
+- Higraphs - nodes become sets. This will likely be strictly heirarchical sets (ie no set intersections/ overlaps)
+
+### V0.5
+- Overlapping sets.
 
 # Getting Started with editing the code
 If you are totally new to Qt (or PySide, the Python version used here), this is a [good tutorial](www.pythonguis.com/tutorials/pyside6-qgraphics-vector-graphics/)
