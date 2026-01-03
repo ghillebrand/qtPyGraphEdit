@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 """
-V00 of a Python Graph Editing Tool. 
+V01 of a Python Graph Editing Tool. 
 Grant Hillebrand 
 
 See https://isijingi.co.za/wp/category/higraph/ for related posts.
 
 """
-
+#TODO: Tidy these up to from <lib> import <used>
 import sys
 import os
 import copy
 import math
+import re
 import traceback  #for the Python window
+
+#For file handling and clipboard
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
 
 #Debugging stuff
 
@@ -25,7 +30,7 @@ from typing import List, Dict
 from PySide6.QtWidgets import ( QApplication, QWidget, QMainWindow, QDialog,
             QGraphicsScene, QGraphicsView, QListWidget, QListWidgetItem,
             QGraphicsEllipseItem, QGraphicsItem, QGraphicsRectItem, QGraphicsTextItem, QGraphicsLineItem,
-            QLineEdit, QInputDialog, QMenu, QFileDialog, QStyleOptionGraphicsItem,
+            QLineEdit, QInputDialog, QMenu, QFileDialog, QStyleOptionGraphicsItem, QGraphicsObject,
             QSlider, QLabel, QStatusBar,
             QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton)
 
@@ -35,48 +40,27 @@ from PySide6.QtGui import (QStandardItemModel, QStandardItem, QPolygonF,QPainter
             QPainterPath, QPainterPathStroker,
             QGuiApplication, QImage, QPixmap)
 from PySide6.QtCore import (QLineF, QPointF,QPoint, QRect, QRectF, 
-            QSize, QSizeF, Qt, Signal, Slot, QTimer, 
+            QSize, QSizeF, Qt, Signal, Slot, QTimer, QObject,
             QMimeData, QBuffer, QByteArray, QIODevice)
 from PySide6.QtSvg import QSvgGenerator
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 
 from ui_form import Ui_MainWindow
-#from dlgCredits import Ui_dlgCredits
 from ui_Credits import Ui_dlgCredits
 from Ui_HelpAbout import Ui_dlgAbout
-#from dlgHelpAbout import Ui_dlgAbout 
 
 # core Graph class:
 from coreGraph import Graph
 
-# XML serialiser/ file writing
-#TODO: should this get folded in to some other object? Possibly `graphModel`
-import yEdXfileOnly as yEd
-
 #Helper & housekeeping functions
+#Draw nice edges
+from PolyLineItemHG import StraightLineItem, HermiteSplineItem, HandleItem
+
+#cGPT edit code
+from EditVisItemDialog import EditVisEdgeItemDialog, EditVisNodeItemDialog
 
 #Global constants. 
-#TODO: Put these in a config file at some point
-NODESIZE = 15
-#Selection tolerance
-HITSIZE = 5
-#Offset to use when pasting nodes
-PASTE_OFFSET = 20
-
-APP_NAME = "qtPyGraphEdit V00"
-
-# Indices for Qt Item metadata tags 
-#index data: item Num from Graph
-KEY_INDEX = Qt.UserRole + 1
-#type date: item type 
-KEY_ROLE = Qt.UserRole + 2
-
-# To let Qt know what are nodes and what are edges
-#TODO: Can ListWidgets take any type for roles? (Items can)
-ROLE_NODE = QListWidgetItem.ItemType.UserType + 1
-ROLE_EDGE = QListWidgetItem.ItemType.UserType + 2
-#Control boxes for connecting/ moving
-ROLE_CB = QListWidgetItem.ItemType.UserType + 3
+from  HGConstants import *
 
 class graphModel(QStandardItemModel):
     """ Hold the visual details for the nodes and edges of the graph (x,y, size)
@@ -91,8 +75,8 @@ class graphModel(QStandardItemModel):
         super().__init__()
         #Setup the abstract graph
         self.Gr = Graph()
-        #Read this from config/ on file load
-        self.isDigraph = True #False  #Test with True, since removing stuff is normally easier
+        #TODO: Read this from config/ on file load
+        self.isDigraph = ISDIGRAPH   #Test with True, since removing stuff is normally easier
 
     def __repr__(self):
         rStr =""
@@ -105,24 +89,23 @@ class graphModel(QStandardItemModel):
 
     __str__ = __repr__
 
+
     def getModelItems(self):
         return [f"{self.item(i).text()}::{self.item(i).data(KEY_INDEX)} ({self.item(i).data(KEY_ROLE)})" \
             for i in range(self.rowCount())]
 
-    def addGMNode(self,posn,nameP=""):
+    def addGMNode(self,posn,nameP="",id=None):
         """Make a Graph Model NODE item, return the item and the index number (item,n) """
-        #TODO: name should be a param here
         #NB: The order in the lists (Gr, listView and model MUST BE MAINTAINED.
 
         # Make the coreGraph02 node
-        n = self.Gr.addNode()
+        n = self.Gr.addNode(id=id)
         #Default name is node number
         if not nameP:
             self.Gr.nodeD[n].metadata.update({'name': f"n{n}"})
         else:
             self.Gr.nodeD[n].metadata.update({'name': nameP})
 
-        #TODO: How to have an item.dispText (dispName might be better?) at this level. Will need to sync onChange()
         #Make the Qt Item with text n
         item = QStandardItem(str(n))
         item.setData(n,KEY_INDEX)
@@ -135,13 +118,13 @@ class graphModel(QStandardItemModel):
         """ Returns all the Graph Model Nodes"""
         return [self.item(i).data(self.ROLE_NODE) for i in range(self.rowCount())]
 
-    def addGMEdge(self,sItem, eItem, nameP=None):
+    def addGMEdge(self,sItem, eItem, nameP=None, id=None):
         """Make a Graph Model EDGE item, return the item and the index number (item,n) 
            Note that either (but not both) of s & e may also be an edge (hypergraph)
         """
         start = sItem.nodeNum
         end = eItem.nodeNum
-        e = self.Gr.addEdge(start,end)
+        e = self.Gr.addEdge(start,end,id=id)
         self.Gr.edgeD[e].metadata.update({'name':nameP })
         #Make the Qt Item with text e
         item = QStandardItem(str(e))
@@ -215,17 +198,23 @@ class graphModel(QStandardItemModel):
         Graph.nextID = 0
         super().clear()
 
-class VisNodeItem(QGraphicsItem):
-    """ Create a new node - both Graph Model and Visual ("graphics") This connects visual Rect to model and list """
+class VisNodeItem(QGraphicsObject):
+    """ Create a new node - both Graph Model and Visual ("graphics") 
+    This connects visual Rect to model and list 
+    
+    """
+    #Create the signal for editing
+    requestEdit = Signal(object)  
 
-    def __init__(self,posn,model,listWidget, parent=None, nameP =""):
+    def __init__(self,posn,model,listWidget, parent=None, nameP ="", id=None,
+                    metadata={}, metadataAttributes={}):
         #print(f"In VisNodeItem {posn =}")
         super().__init__(parent)
         self.suppressItemChange = True  # suppress itemChange (was protected, but scene needs to set it)
         
         self.model = model
         self.listWidget = listWidget
-        #Store the lines that start/ end at this node
+        #Store the edges that start/ end at this node
         self.startsEdges = []  
         self.endsEdges = []  
 
@@ -233,7 +222,19 @@ class VisNodeItem(QGraphicsItem):
         self.setPos(posn)
         
         #Create an abstract node, and keep the index as well
-        self.node,self.nodeNum = self.model.addGMNode(posn,nameP=nameP)
+        self.node,self.nodeNum = self.model.addGMNode(posn,nameP=nameP,id=id)
+
+        #Additional graph-relevant node data
+        self.metadata = self.model.Gr.nodeD[self.nodeNum].metadata
+        #How to display each metadata item
+        #"deep copy" the dict
+        for k,v in metadata.items():
+            self.metadata[k] = v
+        #initialise metadataAttributes if not passed in:
+        if len(metadataAttributes) > 0:
+            self.metadataAttributes = metadataAttributes
+        else:
+            self.metadataAttributes = {'name':{'display':DISPLAY_NAME_BY_DEFAULT}}
 
         #add to the text list
         lWitem = QListWidgetItem(self.model.Gr.nodeD[self.nodeNum].metadata['name'])
@@ -250,6 +251,14 @@ class VisNodeItem(QGraphicsItem):
         #self.textItem.setFlag(QGraphicsItem.ItemIsFocusable, False)
 
         self.dispText = self.model.Gr.nodeD[int(self.nodeNum)].metadata['name']
+
+        #a place to display metadata
+        self.metaDisplay = TransparentTextItem("xx", parent=self)
+        self.metaDisplay.setPos(QPointF(NODESIZE/2,-NODESIZE*2))  #NODESIZE/2,0))
+        self.metaDisplay.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        self.metaDisplay.setFlag(QGraphicsItem.ItemIsFocusable, False)
+        #populate it
+        self.setMetadataDisplay()
 
         #Non-display version, for referencing to model and listView
         self.setData(KEY_INDEX, self.nodeNum)
@@ -278,9 +287,42 @@ class VisNodeItem(QGraphicsItem):
         self.suppressItemChange = False  # enable itemChange normally
 
     def __repr__(self):
-        return f"\n** VisNodeItem {super().__repr__()}\nIndex:{self.data(KEY_INDEX) }  Role:{self.data(KEY_ROLE) =} @ {self.pos() =}\n  \
-                {self.startsEdges = }  ,  {self.endsEdges = }" #\n {self.nodeShape =})"
+        return f"\n** VisNodeItem {super().__repr__()}\nIndex:{self.data(KEY_INDEX) }  Role:{self.data(KEY_ROLE) =} @ {self.pos() =}\n\
+                {self.startsEdges = },\n{self.endsEdges = }\n**" #\n {self.nodeShape =})"
     __str__ = __repr__
+
+    def toXML(self,Xparent):
+        """ add an Element Tree node to the XML parent node with the Edge Data """
+        xmlNode = ET.Element("node", id=str(self.nodeNum))
+
+        data = ET.SubElement(xmlNode, "data", key="data_node")
+        shape = ET.SubElement(data, "y:" + "ShapeNode")
+        ET.SubElement(shape, "y:Geometry", {'x':str(self.pos().x()), 'y':str(self.pos().y())})
+        nodeLabel = ET.SubElement(shape, "y:NodeLabel")
+        nodeLabel.text = self.metadata['name']
+        for atK,atV in self.metadataAttributes['name'].items():
+            metaAtt = ET.SubElement(nodeLabel, "h:metadataAttribute", {"key":atK,"value":str(atV)})
+        
+        #add metadata other than name
+        if len(self.metadata) >= 2:
+            for k, v in self.metadata.items():
+                if k != "name":
+                    metaEl  = ET.SubElement(xmlNode, "h:metadata", {"key":k,"value":str(v)})
+                    for atK,atV in self.metadataAttributes[k].items():
+                        metaAtt = ET.SubElement(metaEl, "h:metadataAttribute", {"key":atK,"value":str(atV)})
+
+        return xmlNode
+
+    def setMetadataDisplay(self):
+        """setup metadata to display
+            This should be the same code as in VisEdgeItem
+        """
+        metaStr = ''
+        for k,v in self.metadata.items():
+            if k != 'name':
+                if self.metadataAttributes[k]['display']:
+                    metaStr += "\n"+k +":"+v
+        self.metaDisplay.setPlainText(metaStr)
 
     def boundingRect(self):
 
@@ -300,6 +342,13 @@ class VisNodeItem(QGraphicsItem):
         bRect = nodeRect.united(textRect).adjusted(-penWidth,-penWidth,penWidth,penWidth)
         return bRect
 
+        #TODO: This allows the attribs to be selected, but makes for an overly big bounding rect. 
+        # shape() might be a better solution.
+        #adjust = 2 # self.pen.width() / 2
+        #return self.childrenBoundingRect().adjusted(-adjust, -adjust, adjust, adjust)
+
+
+
     def paint(self, painter, option, widget=None):
         """ Draw a VisNode item"""
         #Debug: Show the centre of the node
@@ -307,35 +356,46 @@ class VisNodeItem(QGraphicsItem):
         #painter.drawLine(-10,10,10,-10)
         #painter.drawRect(self.boundingRect())
         
-        #painter.setClipping(False)
+        painter.setClipping(True)
 
         if self.isSelected():
             painter.setPen(QPen(Qt.blue,1,Qt.DashLine))
         else:
             painter.setPen(Qt.black)
 
-        if self.hovered:
-            brush = QBrush(Qt.lightGray)  # Light gray fill
-        else:
-            brush = QBrush(Qt.white)      # Normal fill
+        #if self.hovered:
+        #    brush = QBrush(Qt.lightGray)  # Light gray fill
+        #else:
+        brush = QBrush(Qt.white)      # Normal fill
+        #brush = QBrush(Qt.NoBrush) #white)
         painter.setBrush(brush)
 
         #TODO: Use the shape used in the constructor - will need a flag
         #painter.drawRect(self.nodeShape.rect())
         painter.drawEllipse(self.nodeShape.rect())
 
-        # Pos on top (this can be generalised to left, bottom, right, etc)
-        r = QRectF(0,-NODESIZE,0,0) 
-        #update height & width
-        r = painter.drawText(r,Qt.AlignCenter,self.dispText)
-        painter.drawText(r, Qt.AlignCenter, self.dispText)
+        #Draw the text if set to display
+        if self.metadataAttributes['name']['display']:
+            # Pos on top (this can be generalised to left, bottom, right, etc)
+            r = QRectF(0,-NODESIZE,0,0) 
+            #update height & width
+            r = painter.drawText(r,Qt.AlignCenter,self.dispText)
+            painter.drawText(r, Qt.AlignCenter, self.dispText)
+
+        #Draw displayed metadata - automagic?
+
+    def mouseDoubleClickEvent(self, mouseEvent):
+        self.requestEdit.emit(self)
+        mouseEvent.accept()
 
     def itemChange(self,change,value):
         """ in particular, deal with VisNode moving --> update VisEdges"""
         if not self.suppressItemChange:
             #TODO: figure out the differen `change` options
+            #Name change
             self.dispText = self.model.Gr.nodeD[int(self.nodeNum)].metadata['name']
             
+            #Position change
             for sEdge in self.startsEdges:
                 sEdge.updateLine(self)
             for eEdge in self.endsEdges:
@@ -403,27 +463,6 @@ class TransparentTextItem(QGraphicsTextItem):
         else:
             super().mouseDoubleClickEvent(event)
 
-class controlBox(QGraphicsRectItem):
-    """a little square to use as a handle for moving edge control points """
-
-    def __init__(self,pos:QPointF, parent = None):
-        #Parent should be calling edge
-        super().__init__(-HITSIZE/2,-HITSIZE/2,HITSIZE,HITSIZE,parent)
-        self.setPos(pos)
-        self.setPen(QPen(Qt.red))
-        self.setBrush(Qt.red)
-        #Above selected Edges
-        self.setZValue(3000)
-        self.setData(KEY_ROLE, ROLE_CB)
-        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
-        self.setFlag(QGraphicsItem.ItemIsMovable, True)
-        self.setFlags(self.GraphicsItemFlag.ItemSendsScenePositionChanges)        
-        #print(f"control box created {self}")
-
-    def mousePressEvent(self,mouseEvent):
-        #print(f"cBox clicked")
-        super().mousePressEvent(mouseEvent)
-
 class ArrowHeadItem(QGraphicsItem):
     """An arrowhead. 
         position updates are driven from the parent item
@@ -441,10 +480,8 @@ class ArrowHeadItem(QGraphicsItem):
         #Transform by -NODESIZE/2 to not disappear under the node
         self.polygon.translate(QPointF(-NODESIZE/2,0))
         self.setFlag(QGraphicsItem.ItemIsSelectable, False)
-        #Hook in the parent p1 & p2 so that the painter can work out the angle
-        if parent:
-            self.setPos(parent._line.p2()) #TODO: This is not elegant for when edges are not lines
-            self.start = parent._line.p1()
+        self.setFlag(QGraphicsItem.ItemIsMovable, False)
+        self.setZValue(0)
 
     def boundingRect(self):
         # Rectangle covering the polygon
@@ -474,16 +511,17 @@ class ArrowHeadItem(QGraphicsItem):
         painter.drawPolygon(self.polygon)
         painter.restore()
 
-class VisEdgeItem(QGraphicsItem):
+class VisEdgeItem(QGraphicsObject): #QGraphicsItem,QObject):
     """ Create a new edge - both Graph Model and Visual ("graphics")
-      This connects visual Rect to model and list 
+      This connects visual edges to model and list 
     """
-    #TODO: Look at refactoring with more of drawLineV2's structure
-    #needs to be a graphics item of some sort (line)
-    #HSplines will be a separate graphics class?
+    #Create the signal for editing
+    requestEdit = Signal(object)  
 
-    def __init__(self,model,listWidget,sItem, eItem, parent=None, nameP=""):
+    def __init__(self,model,listWidget,sItem, eItem, directed='', parent=None, nameP="", id=None,
+                    polyLineType = DEFAULT_EDGE, points=[],tangents=[],metadata={}, metadataAttributes={}):
         """ Create a visual edge, using the pos of the st and end 
+        points must be QPointFs and tangents must be tuples of QPointFs, relative to the points
         """
         super().__init__(parent)
 
@@ -507,18 +545,35 @@ class VisEdgeItem(QGraphicsItem):
         sName =self.model.Gr.nodeD[sItem.nodeNum].metadata['name'] 
         eName =self.model.Gr.nodeD[eItem.nodeNum].metadata['name'] 
 
-        if not nameP:
-            #TODO: Refactor edgeNum & nodeNum to itemNum for hyperedges
-            self.edge,self.edgeNum = self.model.addGMEdge(sItem,eItem,nameP=f"{sName}->{eName}")
-            #update the name with the edge ID, to help tracking
-            #TODO: Find a more elegant wrapper for this!
-            self.model.Gr.edgeD[self.edgeNum].metadata.update({'name':f"{self.edgeNum} {self.model.Gr.edgeD[self.edgeNum].metadata['name']}"})
-        else:
-            self.edge,self.edgeNum = self.model.addGMEdge(sItem,eItem,nameP=nameP)
+        #if not nameP:
+        #TODO: Refactor edgeNum & nodeNum to itemNum for hyperedges
+        #TODO: Make nameP more configureable
+        #defName = f"{sName}->{eName}"
+        defName = "" #just the ID
+        self.edge,self.edgeNum = self.model.addGMEdge(sItem,eItem,nameP = defName,id=id)
 
+        #update the name with the edge ID, to help tracking
+        # self.metadata is just a more elegant wrapper
+        self.metadata = self.model.Gr.edgeD[self.edgeNum].metadata
+        #"deep copy" the dict
+        for k,v in metadata.items():
+            self.metadata[k] = v
+        #initialise metadataAttributes if not passed in:
+        if len(metadataAttributes) > 0:
+            self.metadataAttributes = metadataAttributes
+        else:
+            self.metadataAttributes = {'name':{'display':DISPLAY_NAME_BY_DEFAULT}}
+
+        #TODO: This overwrites in metadata['name'] value, but it should be the same?
+        #self.model.Gr.edgeD[self.edgeNum].metadata.update({'name':f"{self.edgeNum} {self.model.Gr.edgeD[self.edgeNum].metadata['name']}"})
+        self.metadata['name'] = f"{self.edgeNum} {self.metadata['name']}"
+        if nameP:
+            #self.edge,self.edgeNum = self.model.addGMEdge(sItem,eItem,nameP=nameP)
+            self.metadata['name'] = nameP
+                
         #add to the text list
         #TODO: Should this not be driven from the model?
-        lWitem = QListWidgetItem(self.model.Gr.edgeD[self.edgeNum].metadata['name'])
+        lWitem = QListWidgetItem(self.metadata['name'])
         lWitem.setData(KEY_INDEX,self.edgeNum)
         lWitem.setData(KEY_ROLE,ROLE_EDGE)
         self.listWidget.addItem(lWitem)
@@ -532,30 +587,53 @@ class VisEdgeItem(QGraphicsItem):
         noPen = QPen(Qt.NoPen)
         self.setData(KEY_INDEX, self.edgeNum)
         self.setData(KEY_ROLE, ROLE_EDGE)
+
         #Draw name in the middle
         #self.textItem = QGraphicsTextItem(self.model.Gr.edgeD[self.edgeNum].metadata['name'], parent=self)
         # chatGPT's suggestion to avoid shape() not selecting it - TransparentTextItem
-        self.textItem = TransparentTextItem(self.model.Gr.edgeD[self.edgeNum].metadata['name'], parent=self)
-        #Stop Python GC from mangling things on delete
+        self.textItem = TransparentTextItem(self.model.Gr.edgeD[self.edgeNum].metadata['name'], parent=self) 
+        #Stop Python GC from mangling things on delete. This ref is critical?? - Python crashes on delete without it.?
         self.textItem.my_parent_item = self
 
-        #TODO: choose one of textItem and dispText, and refactor
-        self.dispText = self.model.Gr.edgeD[self.edgeNum].metadata['name']
         self.textItem.setFlag(QGraphicsItem.ItemIsSelectable, False)
         self.textItem.setFlag(QGraphicsItem.ItemIsFocusable, False)
-        
+
+        #a place to display metadata
+        self.metaDisplay = TransparentTextItem("", parent=self)
+        self.metaDisplay.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        self.metaDisplay.setFlag(QGraphicsItem.ItemIsFocusable, False)
+        #populate it
+        self.setMetadataDisplay()
+
         #Create the graphical line
-        #SO uses _line , since Connection isA QGraphicsLineItem
-        # create edgeLine to do that. Allows for replacing line type later.
-        self._line = QtCore.QLineF(sItem.pos(), eItem.pos()) 
-        self.edgeLine = QGraphicsLineItem(self._line,parent=self)
-        #Stop Python GC from mangling things on delete
+        #PointList to pass to polyLine
+        if len(points) > 0:
+            ptList = [self.startNode.pos()] + points + [self.endNode.pos()]
+        else:
+            ptList = [self.startNode.pos(),self.endNode.pos()]
+        #Track what sort of edge this one is
+        self._polyEdge = polyLineType
+        
+        if self._polyEdge == STRAIGHT:
+            self.edgeLine = StraightLineItem(ptList,parent=self)
+        else: #Assume spline! Error checking later!
+            self.edgeLine = HermiteSplineItem(p=ptList,t=tangents,parent=self)
+
+        #Stop Python GC from mangling things on delete (It seems this ref is not critical)
+        self.edgeLine.setData(KEY_ROLE,ROLE_POLYLINE)
         self.edgeLine.my_parent_item = self
-        self.edgeLine.setLine(self._line)
-        self.edgeLine.setPen(noPen)
+
+        #self.edgeLine.setPen(noPen)
         self.edgeLine.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        
         #Add in the arrowhead for digraph
-        if self.model.isDigraph:
+        #TODO: Should this not only be in paint(), to update dynamically? updateLine() might be the place?
+        if directed == '':
+            self.isDirected = self.model.isDigraph
+        else:
+            self.isDirected = directed == 'true'
+
+        if self.isDirected:
             self.endShape = ArrowHeadItem(size=NODESIZE/2, parent=self)
         else:
             self.endShape = None
@@ -570,15 +648,16 @@ class VisEdgeItem(QGraphicsItem):
         self.setEnd(eItem)
 
         #Selection and editing vars:
-        #Control Boxes
-        self.scB = None
-        self.ecB = None
+        #edit Handles
+        self.stH = None
+        self.endH = None
 
         self.setFlags(self.GraphicsItemFlag.ItemSendsScenePositionChanges)
         #V00: Set edges to only move via nodes.
-        #TODO: Needs to be selectable to edit name/ show in list.
+        #Needs to be selectable to edit name/ show in list.
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
-        self.setFlag(QGraphicsItem.ItemIsMovable, False) #Moving done via enditems
+        self.setFlag(QGraphicsItem.ItemIsMovable, False) #Moving done via enditems/ handles
+        self.setZValue(0)
         #Checking if this was why there were ghosts
         #self.setCacheMode(QGraphicsItem.NoCache)
         
@@ -588,15 +667,83 @@ class VisEdgeItem(QGraphicsItem):
         self.suppressItemChange = False  # enable itemChange normally
 
     def __repr__(self):
-        return f"\n>> VisEdgeItem {super().__repr__()}\n {self.textItem =}  {self.edgeLine =}\nID: {self.edgeNum} {self.dispText} s:({self.startNode.data(KEY_INDEX)})" + \
-                        f" e:({self.endNode.data(KEY_INDEX)}) {self.startNode.nodeShape =} {self.endNode.nodeShape =}<<"
+        return f"\n>> VisEdgeItem {super().__repr__()}\n {self.textItem.toPlainText() =}\n{self.edgeLine =}\nID: {self.edgeNum} text:{self.textItem.toPlainText()} s:({self.startNode.data(KEY_INDEX)})" + \
+                        f" e:({self.endNode.data(KEY_INDEX)}) <<"
+
+    def toXML(self,Xparent):
+        """ add an Element Tree node to the XML parent node with the Edge Data 
+            This uses the yEd names for line types for compatibility
+        """
+        xmlEdge = ET.Element(
+            "edge",
+            id=str(self.edgeNum),
+            source=str(self.startNode.nodeNum),
+            target=str(self.endNode.nodeNum)
+        )
+        if self.isDirected: 
+            xmlEdge.set("directed", "true")     
+        else:
+            xmlEdge.set("directed", "false") 
+
+        data = ET.SubElement(xmlEdge, "data", key="data_edge")
+        if self._polyEdge == STRAIGHT:
+            pl = ET.SubElement(data, "y:PolyLineEdge")
+        else:
+            pl = ET.SubElement(data, "y:QuadCurveEdge")
+
+        if self.isDirected: 
+            ET.SubElement(pl, "y:Arrows", {'source':"none", 'target':"standard"})  
+
+        #Add in the points   
+        points = self.edgeLine._p
+        if len(points) > 0:
+            path = ET.SubElement(pl,"y:Path ") #No ports yet
+            pathElts = []
+            for p in points[1:-1]:
+                pathElts.append(ET.SubElement(path, "y:Point", {"x":str(p.x()),"y":str(p.y())}))
+            #Tangents 
+            if self._polyEdge == SPLINE:
+                tangents = self.edgeLine._t
+
+                if len(tangents) > 0:
+                    ET.SubElement(path,"h:StartTangent", {"x":str(tangents[0][1].x()),
+                                                          "y":str(tangents[0][1].y())})
+                    for i,pElt in enumerate(pathElts):
+                        ET.SubElement(pElt,"h:Tangent",
+                                            {"leftx":str(tangents[i+1][0].x()), "lefty":str(tangents[i+1][0].y()), 
+                                             "rightx":str(tangents[i+1][1].x()),"righty":str(tangents[i+1][1].y())})
+
+                    ET.SubElement(path,"h:EndTangent", {"x":str(tangents[-1][0].x()),"y":str(tangents[-1][0].y())})
+
+
+        #TODO: Refactor edge save/ load code to not use edgeLabel as `name` - do it all in metadata
+        label = ET.SubElement(pl, "y:EdgeLabel")
+        label.text = self.metadata['name']
+        for atK,atV in self.metadataAttributes['name'].items():
+            metaAtt = ET.SubElement(label, "h:metadataAttribute", {"key":atK,"value":str(atV)})
+
+        #add metadata other than name
+        if len(self.metadata) >= 2:
+            for k, v in self.metadata.items():
+                if k != "name":
+                    metaEl  = ET.SubElement(xmlEdge, "h:metadata", {"key":k,"value":str(v)})
+                    for atK,atV in self.metadataAttributes[k].items():
+                        metaAtt = ET.SubElement(metaEl, "h:metadataAttribute", {"key":atK,"value":str(atV)})
+
+
+        return xmlEdge
+        
+    def setMetadataDisplay(self):
+        metaStr = ''
+        for k,v in self.metadata.items():
+            if k != 'name':
+                if self.metadataAttributes[k]['display']:
+                    metaStr += "\n"+k +":"+v
+        self.metaDisplay.setPlainText(metaStr)
 
     def boundingRect(self):
         """ edges boundingRect """
         adjust = 2 # self.pen.width() / 2
-        #self.bRect = self.edgeLine.boundingRect()
-        #update the text pos on move as well (itemChange???)
-        #return self.bRect.adjusted(-adjust, -adjust, adjust, adjust)
         return self.childrenBoundingRect().adjusted(-adjust, -adjust, adjust, adjust)
 
     def paint(self, painter, option, widget=None):
@@ -604,26 +751,28 @@ class VisEdgeItem(QGraphicsItem):
         #painter.setPen(Qt.red)
         #painter.drawRect(self.bRect)
         #use the textBRect to adjust exact display position on the line (can be a [0,1] multiplier)
-
         textBRect = self.textItem.boundingRect()
-        #To offset, `` from x
-        self.textItem.setPos((self.startNode.pos().x()+self.endNode.pos().x())/2 - textBRect.width()/2, \
-            (self.startNode.pos().y()+self.endNode.pos().y() - textBRect.height() )/2)
-        
-        #If you don't use .textItem, but .dispText (deprecate)
-        tPos = QPointF((self.startNode.pos().x()+self.endNode.pos().x())/2 - textBRect.width()/2, \
-            (self.startNode.pos().y()+self.endNode.pos().y())/2)
-
+        midPt = self.edgeLine.textPos(0.5)
+        #painter.drawEllipse(midPt,2,2)
+        self.textItem.setPos(midPt.x() - textBRect.width()/2  + NODESIZE/2, \
+                             midPt.y() - textBRect.height()/2 + NODESIZE/2)
+        self.metaDisplay.setPos(self.textItem.pos()+QPointF(0,0))
         #painter.drawRect(self.textItem.boundingRect())
        
         if self.isSelected():
             painter.setPen(QPen(Qt.blue,1,Qt.DashLine))
             self.textItem.setDefaultTextColor(Qt.blue)   
+            self.metaDisplay.setDefaultTextColor(Qt.blue)
         else:
             painter.setPen(Qt.black)
             self.textItem.setDefaultTextColor(Qt.black)
+            self.metaDisplay.setDefaultTextColor(Qt.black)
 
-        painter.drawLine(self._line)
+        #TODO: Move this to itemChanged?
+        self.textItem.setVisible(self.metadataAttributes['name']['display'])
+
+        self.edgeLine.paint(painter,option,widget)
+
         #painter.drawText(QPoint(0,0),self.textItem.toPlainText())
         #painter.drawText(tPos,self.dispText) #textItem.toPlainText())
 
@@ -632,11 +781,8 @@ class VisEdgeItem(QGraphicsItem):
 
     def shape(self):
         """ Set a tight selection shape """
-        path = QPainterPath()
-        #Line
-        path.moveTo(self.startNode.pos())
-        path.lineTo(self.endNode.pos())
-        
+        path = self.edgeLine.shape()
+
         #Text
         path.addRect(self.textItem.boundingRect().translated(self.textItem.pos()))
 
@@ -650,82 +796,131 @@ class VisEdgeItem(QGraphicsItem):
             modifiers = mouseEvent.modifiers()
             #TODO: Handle shift & ctrl click properly. 
             #TODO: Should this be here, or in Scene.mousePress???
-            if not (modifiers & Qt.ShiftModifier or modifiers & Qt.ControlModifier) and \
-                not self.isSelected():
+            #if not (modifiers & Qt.ShiftModifier or modifiers & Qt.ControlModifier) and \
+            #    not self.isSelected():
+            if not self.isSelected():
+                self.scene().clearEdgeOnly(self)
                 self.scene().clearSelection()
+                
             self.setSelected(True)
             #Highlight the list item as well
             #print(f"\nSelected elt: {self.data(KEY_INDEX)}\n")
             lWItem = self.listWidget.findItemByIdx(self.data(KEY_INDEX))
             self.listWidget.setCurrentItem(lWItem)
 
+    def mouseDoubleClickEvent(self, mouseEvent):
+        self.requestEdit.emit(self)
+        mouseEvent.accept()
+
     def itemChange(self, change, value):
         #print(f"edge item change {change},{value}")
         #guard clause to trap calls from __init__
         if not self.suppressItemChange:
+            if change == QGraphicsItem.ItemSelectedHasChanged:
+                #print(f"Selected Edge {self.dispText} ")
+                #Select the children
+                for child in self.childItems():
+                    child.setSelected(value)
+
             # Change the display text - what would the <change> be? Using ToolTip as the closest
+            #TODO: Fix the `change` value to something more meanigful
             if change == QGraphicsItem.GraphicsItemChange.ItemToolTipChange:
-                #Note: .dispText is simpler but .textItem is richer.
-                self.dispText = self.model.Gr.edgeD[int(self.edgeNum)].metadata['name']
                 self.textItem.setPlainText(self.model.Gr.edgeD[self.edgeNum].metadata['name'] )
         
         return super().itemChange(change, value)
 
-    #From musicamente's SO post    
-    def setP2(self, p2):
-        #only used in the creation phase
-        self._line.setP2(p2)
-        self.edgeLine.setLine(self._line)
+    def setPolylineType(self, lineType:int):
+        """set and change _polyEdge """
+        print(f"Set edge type to {lineType}")
+        #check and then call 
+        if self._polyEdge != lineType:
+            self._polyEdge = lineType
+            ptList = self.edgeLine._p
+            if self.isOnlySelected:
+                self.scene().clearEdgeOnly(self)
+            if self._polyEdge == STRAIGHT:
+                #is this going to cause garbage collection issues?
+                self.scene().removeItem(self.edgeLine)
+                self.edgeLine = StraightLineItem(ptList,parent=self)
+            elif self._polyEdge == SPLINE:
+                self.scene().removeItem(self.edgeLine)
+                self.edgeLine = HermiteSplineItem(ptList,parent=self)
+            #Add as onlySelected?
+            self.updateLine()
+
+    def setDirected(self, isDirected:bool):
+        """ set is driected, add/ remove arrow"""
     
+        if self.isDirected != isDirected:
+            self.isDirected = isDirected
+            if isDirected:  #restore the arrow
+                self.endShape = ArrowHeadItem(size=NODESIZE/2, parent=self)
+            else:
+                #Note, previous endShape dereference should delete it
+                self.scene().removeItem(self.endShape)
+                self.endShape = None
+            self.updateLine()
+                
+
+    #From musicamente's SO post   
+    # These are to setup the initial edge, which will always start out as a 2 pt edge. 
+    ###TODO: Polylines will allow creation of multi-point lines up front - change rubberline to use a polyline
+    def setP2(self, p2):
+        self.edgeLine.setP(-1,p2) #-1 is the last pointin the list
+
     def setStart(self, start):
         """ Set the startItem to start. Also update model, for edits"""
-        #TODO: Add updateEdge() to Graph class, then include here
+        #TODO: Add updateEdge() to Graph class, then include here (Done in scene??)
         self.startNode = start
         self.updateLine(start)
 
     def setEnd(self, end):
-        #TODO: Add updateEdge() to Graph class, then include here
+        #TODO: Add updateEdge() to Graph class, then include here??
         self.endNode = end
-        self._line.setP2(end.scenePos())
+        #self._line.setP2(end.scenePos())
+        ###
+        self.edgeLine.setP(-1,end.scenePos())
         self.updateLine(end)
 
-    def updateLine(self, source):
-        """ Tell Qt the ends have moved"""
+    def updateLine(self, source=None):
+        """ Tell Qt the ends have moved. source = None allows an arrow recalc without point change"""
         self.prepareGeometryChange()
+        #TODO: For hypergraphs, start/ end may be a point on a PolyLine
+        #TODO If both start and end are selected, move all the polyline points too.
         if source == self.startNode:
-            #This is a built-in function
-            self._line.setP1(source.scenePos())
-        #TODO: For hypergraphs, this will need to change
-        else: #endNode
-            self._line.setP2(source.scenePos())
-        self.edgeLine.setLine(self._line)
+            self.edgeLine.setP(0,source.scenePos())
+        elif source == self.endNode: #endNode
+            self.edgeLine.setP(-1,source.scenePos())
+
+        #Draw the arrow/ end shape
         if self.endShape:
             self.endShape.prepareGeometryChange()
             # Compute rotation angle
-            dx = self._line.p2().x() - self._line.p1().x()
-            dy = self._line.p2().y() - self._line.p1().y()
-            angle_deg = math.degrees(math.atan2(dy, dx))
+            #TODO: This version the visible "end" is HITSIZE pixels away from the node centre 
+            angle_deg = self.edgeLine.endAngle()
             self.endShape.setRotation(angle_deg)
+            self.endShape.setPos(self.edgeLine._p[-1])
 
-            self.endShape.setPos(self._line.p2())
-        self.update()
-
-    #TODO: Move the end of an edge to another node
+        self.edgeLine.updatePath()
 
 class grScene(QGraphicsScene):
     """ holds and extends all the drawing, connects to model using VisNodeItem and VisEdgeItem"""
-
     # See Hg QT6.gaphor `GrScene INSERT states` for analysis of states (StateMachine)
 
     #Mouse state enum
     # INSERTEDGE2CLICK for handling choice of item in ambiguous cases, which requires a click to choose, 
     # and thus the end is selected on a Press, not a release.
-    INSERTNODE, INSERTEDGE, POINTER, INSERTEDGE2CLICK, MOVEEDGEEND = range(5)
+    INSERTNODE, INSERTEDGE, POINTER, INSERTEDGE2CLICK, MOVEEDGEEND, MOVEHANDLE, DOUBLECLICK, DRAGGING = range(8)
 
-    def __init__(self, model,listWidget):
+    #TO pass edit requests to mainwindow. Signal must be class, not instance variables.
+    edgeEditRequested = Signal(object)
+    nodeEditRequested = Signal(object)
+
+    def __init__(self, model,listWidget,mainwindow):
         super().__init__()
         self.model = model
         self.listWidget = listWidget
+        self.mainwindow = mainwindow
         self.mouseMode = self.POINTER
 
         # Placeholders for nodes & edges between mouse states when creating an edge
@@ -741,15 +936,18 @@ class grScene(QGraphicsScene):
         #Track single item selection (for edges)
         self.onlySelected = None
 
+        #For dragging
+        self._lastMousePos = QPointF(0,0)
+
         #Add axes to help see how things move & debug graphical issues.
-        #TODO: THere must be a better solution!
+            #TODO: THere must be a better solution!
         #WHite to provide a auto-zoom anchor
         """
         VLine = QGraphicsLineItem(0,100,0,-100)
         self.addItem(VLine)
-        VLine.setPen(QPen(Qt.white))
+        VLine.setPen(QPen(Qt.black))
         HLine = QGraphicsLineItem(100,0,-100,0)
-        HLine.setPen(QPen(Qt.white))
+        HLine.setPen(QPen(Qt.black))
         self.addItem(HLine) 
         """
 
@@ -773,8 +971,8 @@ class grScene(QGraphicsScene):
             TODO: This can be extended to return the <point> on the item, to allow for multiedges and blob 'control points'
         """
         #TODO: Change the param to pos, to make it more useful
+        #or use .mapToGlobal(pos)) instead of passing in the whole event?
         mPos = mouseEvent.scenePos()
-        #TODO: Make the size a config param (at call time)
         items = self.itemsHere(mPos, size, itemRoles)
         #print(f"{items =}")
         pickedItem = None
@@ -791,11 +989,16 @@ class grScene(QGraphicsScene):
             for itm in items:
                 if itm.data(KEY_ROLE) == ROLE_EDGE:
                     iType = "Edge"
+                    label = f"{iType}:{itm.data(KEY_INDEX)}>{itm.textItem.toPlainText()}" 
                 elif itm.data(KEY_ROLE) == ROLE_NODE:
                     iType = "Node"
+                    label = f"{iType}:{itm.data(KEY_INDEX)}>{itm.dispText}" 
+                elif itm.data(KEY_ROLE) == ROLE_HANDLE:
+                    iType = "Handle"
+                    label = f"{iType}" 
                 else:
                     iType = ""
-                label = f"{iType}:{itm.data(KEY_INDEX)}>{itm.dispText}" 
+                    label = f"{iType}:Unkown thing clicked" 
                 act = QAction(label, menu)
                 menu.addAction(act)
                 actions.append((act, itm))
@@ -814,8 +1017,36 @@ class grScene(QGraphicsScene):
 
         return pickedItem
 
+    def contextMenu(self, mouseEvent, menuElts: List[tuple]):
+        """ Takes a list of description:action tuples, and returns the chosen one, or None
+        """
+        # standalone popup context menu
+        menu = QMenu()
+        #Keep a list (dict?) of actions, to act on
+        actions = []
+        
+        for (label,action) in menuElts:
+            act = QAction(label, menu)
+            menu.addAction(act)
+            actions.append((act, action))
+        #Add None to the end of the list
+        act = QAction("None", menu)
+        menu.addAction(act)
+        actions.append((act, None))
+
+        # exec() returns the QAction that was triggered (or None) 
+        chosen_action = menu.exec(mouseEvent.screenPos()) 
+        pickedItem = None
+        if chosen_action:
+            # find which act corresponds to that action
+            for act, itm in actions:
+                if act is chosen_action:
+                        pickedItem = itm
+
+        return pickedItem
+
     def getSceneMousePos(self):
-        """ return the current mouse position. Needed for multi-click inserts. Assumes only 1 view"""
+        """ return the current scene mouse position using *global* pos. Needed for multi-click inserts. Assumes only 1 view"""
         global_pos = QCursor.pos()
         #Assume only 1 view for now
         view = self.views()[0]
@@ -835,15 +1066,22 @@ class grScene(QGraphicsScene):
         self.endPoint = self.getSceneMousePos()
 
         #Create the rubberBand line (actual edge is created on mouseRelease)
+        ###polyline
+        #self.rubberLine = StraightLineItem([self.startPoint, self.endPoint])
         self.rubberLine = QLineF(self.startPoint, self.endPoint)
+
+        #self.GrRubberLine = self.addItem(self.rubberLine)
         self.GrRubberLine = self.addLine(self.rubberLine)
         
     def stretchRubberLine(self,mPos):
         """ called from INSERTEDGE: mouseMove """
         self.endPoint = mPos # mouseEvent.scenePos()
+        ###
         self.rubberLine.setP2(self.endPoint)
+        #self.rubberLine.setP(-1,self.endPoint)
+        #self.rubberLine.updatePath()
         self.GrRubberLine.setLine(self.rubberLine)
-        
+
     def endRubberLine(self):
         """called on successful end item found for edge:
          from INSERTEDGE mouseRelease or INSERTEDGE2CLICK mousePress """
@@ -869,40 +1107,41 @@ class grScene(QGraphicsScene):
         self.GrRubberLine =None
 
     #Code to handle end terminator moving
-    def startMovingEdgeEnd(self,edge, cBox):
-        """ relink edge, using cBox as the floating end point
+    def startMovingEdgeEnd(self,edge, handle):
+        """ relink edge, using handle as the floating end point
         similar to rubberLine, but we now have a line to work with"""
         #print(f"StartMovingEdge {edge}")
-        self.cBox = cBox #Store the box for the Move/ Finish functions
-        #is cBox at start or end?
-        if self.cBox.pos() == edge.startNode.pos():
+        self.handle = handle #Store the box for the Move/ Finish functions
+        #is handle at start or end?
+        if self.handle.pos() == edge.startNode.pos():
             # NOTE: Node relinking is only done on successful finish, so track the old Terminator item
             self.oldTermItem = edge.startNode
             self.EdgeEnd = "start"
-            #link edge to CB to move
-            edge.setStart(cBox)
+            #link edge to handle to move
+            edge.setStart(handle)
         else:
             self.EdgeEnd = "end"
             # NOTE: Node relinking is only done on successful finish
             self.oldTermItem = edge.endNode
-            edge.setEnd(cBox)
+            edge.setEnd(handle)
 
-        cBox.setFlag(QGraphicsItem.ItemIsMovable, True)
+        handle.setFlag(QGraphicsItem.ItemIsMovable, True)
 
     def MoveEdgeEnd(self,edge,mPos):
         """edge is a VisEdgeItem, that has been set up for moving (cBs in place) """
-        self.cBox.setPos(mPos) 
-        edge.updateLine(self.cBox)
+        self.handle.setPos(mPos) 
+        edge.updateLine(self.handle)
         
     def finishMovingEdgeEnd(self,edge,mPos,mouseEvent):
         """ note pickItemAt needs the full mouseEvent (screenPos) """
 
         #Check that this is on a valid node/ Termination pt
         newTermItem = self.pickItemAt(mouseEvent, QSize(HITSIZE,HITSIZE),[ROLE_NODE])
+        #print(f"finMovEdge {newTermItem=} {mPos=}")
         if newTermItem:
             #Unlink Edge from CB, link to newItem, if we have really moved:
+            #TODO: Extend to self-edges once multi-point edges are working
             if self.EdgeEnd == "start" and newTermItem != self.oldTermItem:
-                #edge.startNode = newTermItem
                 edge.setStart(newTermItem)
                 #relink self.oldTermItem in Gr
                 # While clunky, these params will work with any item type
@@ -919,32 +1158,49 @@ class grScene(QGraphicsScene):
                 newTermItem.endsEdges.append(edge)
         else: # link back to old
             #print("Missed (nothing found) on relink")
-            self.cBox.setPos(self.oldTermItem.pos())
+            self.handle.setPos(self.oldTermItem.pos())
             #TODO: Check all the linkages ()
             if self.EdgeEnd == "start":
                 edge.setStart(self.oldTermItem)
             else:  #end
                 edge.setEnd(self.oldTermItem)
 
-        self.cBox = None
+        self.handle = None
 
     def clearEdgeOnly(self, edge):
         """ Remove the controlboxes from an edge and deselect."""
-        #self.clearSelection()
+        #TODO: Multipoint edges can add points as they go
         #For edges, was there only one selected? Clear.
-        if edge.scB:
-            edge.setZValue(0) #below nodes
-            self.removeItem(edge.scB)
-            edge.scB = None
-        if edge.ecB:
-            #TODO: edge -> scene 'loop'
-            self.removeItem(edge.ecB)
-            edge.ecB = None
         edge.isOnlySelected = None
 
+        #Clear the scene selection too
+        self.onlySelected = None
+
+        #clear any pointers to handles
+        if edge.stH:
+            edge.setZValue(0) #below nodes
+            edge.stH = None
+        if edge.endH:
+            edge.endH = None
+        edge.edgeLine.setSelected(False)
+        
     def mousePressEvent(self, mouseEvent):
         mPos = mouseEvent.scenePos()
+        #Track the last mouse position for Pointer moves
+        self._lastMousePos = mPos
+
         #print(f"Press {self.mouseMode =}")
+        #print(f"\nStart mousePress {len(self.selectedItems())=}",end = ' ')
+        #for s in self.selectedItems():
+        #    print(type(s),end = ",")
+        #print()
+
+        #Throw away the second single click from a double click.
+        if self.mouseMode == self.DOUBLECLICK:
+            self.mouseMode = self.POINTER
+            mouseEvent.accept()
+            return
+
         if (mouseEvent.button() == Qt.MouseButton.LeftButton):
 
             if self.mouseMode == self.INSERTNODE:
@@ -953,6 +1209,7 @@ class grScene(QGraphicsScene):
                 if self.onlySelected:
                     self.clearEdgeOnly(self.onlySelected)
 
+                #TODO: For blobs, this will have to move to mouseRelease, to allow rectangle drag
                 #Items sizes should be relative to (0,0)
                 mPos = mouseEvent.scenePos()
                 #print(f"Insert node: {mPos =}, \n{mouseEvent =}")
@@ -967,7 +1224,6 @@ class grScene(QGraphicsScene):
 
                 #TODO: Should this be actionPointer, to update the toolbar, etc
                 self.mouseMode = self.POINTER
-                #TODO: Don't let Qt add a newly created item to the selection
                 return
                 
             elif self.mouseMode == self.INSERTEDGE:
@@ -985,7 +1241,7 @@ class grScene(QGraphicsScene):
                 else: #Miss
                     self.tmpEdgeSt = None
 
-            #*This* click means END the rubberBanding, create the edge 
+            #This is the end of a 2-click-insert (via pickItem) -  means END the rubberBanding, create the edge 
             elif self.mouseMode == self.INSERTEDGE2CLICK: 
                 itm = self.pickItemAt(mouseEvent,QSizeF(10,10),[ROLE_NODE]) #,ROLE_EDGE
                 if itm:
@@ -999,78 +1255,172 @@ class grScene(QGraphicsScene):
             elif self.mouseMode == self.POINTER:
                 # SCENE based selection - as much as possible is handled at the Qt Item level
                 
-                # Handle moving the end selected edge (rerouting)
                 #Note: this design requires selecting, then moving on the next click
 
-                #Only do this if we have exactly 1 edge selected
-                #A click means start a new selection
+                #A click on a HANDLE or NODE means select and possibly move. 
+                # On an EDGE means select
 
-                #TODO: Once pickItemAt() uses mPos, not the whole event, use it
-                #selItem = self.pickItemAt(mouseEvent,HITSIZE,[ROLE_EDGE,ROLE_NODE])
-                selItem = self.itemAt(mPos,self.views()[0].transform())
+                #TODO: Make pickItemAt work properly here, and use the filter to contextualise selection (node, edge, handle), must also handle the addition of a click into the stream
+
+                #HACK: Currently this returns the TOP item.  - see TODO above
+                #ArrowHeads should _not_ be selectable/ movable, but they are breaking moves...
+                selItem = self.itemsHere(mPos,QSize(HITSIZE,HITSIZE),[ROLE_EDGE,ROLE_HANDLE,ROLE_NODE, ROLE_POLYLINE])
+                if selItem:
+                    selItem = selItem[0]
+                else:
+                    selItem = None
+
+                #selItem = self.itemAt(mPos,self.views()[0].transform())
+                #if selItem:
+                #    print(f"{type(selItem)=} , {selItem.data(KEY_ROLE)=} , {type(self.onlySelected)=}")
+                #else:
+                #    print("select empty")
+
+                #If a click on a new item, clear old selection, set as this
+                ## THis breaks clicking a handle whilst a edge is selected :/
+                #if len(self.selectedItems()) == 1:
+                #    if self.selectedItems()[0] != selItem:
+                #        self.clearSelection()
+                #        #Don't add anything here - that depends on the rest of the context
 
                 if not selItem: #Nothing selected, clear
                     self.clearSelection()
                     #For edges, was there only one selected? Clear.
                     if self.onlySelected:
-                        self.clearEdgeOnly(self.onlySelected) #onlySelected.isOnlySelected = False
-                        self.onlySelected = None                    
-
-                #Minor hack - leaves cB's until end of drag
-                if selItem and selItem.data(KEY_ROLE) == ROLE_NODE:
-                    if self.onlySelected: #Clear cBs
                         self.clearEdgeOnly(self.onlySelected)
-                    #immediately hand off
-                    super().mousePressEvent(mouseEvent)
-                    return
+                        self.onlySelected = None               
 
-                #clear cB  unless edge or cb, which we handle here #Is this not selecting a Node?
+                #Minor hack - leaves handles until end of drag
+                if selItem and selItem.data(KEY_ROLE) == ROLE_NODE:
+                    if self.onlySelected: #Clear handles
+                        self.clearEdgeOnly(self.onlySelected)
+                    #immediately hand off for Qt to move
+                    #BUG:Dragging With these on, DRAGGING doesn't happen, off, a single node select doesn't clear selection
+                    #Solution: Move `isSelected` to mouseRelease, to allow for movement
+                    #TODO: DRAGGING
+                    #super().mousePressEvent(mouseEvent)
+                    #return
+
+                #deal with selecting end-point handles  (leave ordinary handles & tangents to Qt?)
+                #Move end point handles
+                clickedHandle:bool = selItem and selItem.data(KEY_ROLE) == ROLE_HANDLE 
+
+                #If selecting a POLYLINE, bump select to parent
+                if selItem and selItem.data(KEY_ROLE) == ROLE_POLYLINE :
+                    #print("stepping up from HS to visEdge")
+                    parent = selItem.parentItem()
+                    selItem.setSelected(False)
+                    selItem = parent
+                    selItem.setSelected(True)
+                    
+                #clear handle unless edge or handle, which we deal with here 
                 #different edge selected
-                clickedCB:bool = selItem and selItem.data(KEY_ROLE) == ROLE_CB 
-                clickedDifferentEdge:bool = selItem and selItem.data(KEY_ROLE) == ROLE_EDGE and selItem != self.onlySelected                
-                if not clickedCB and clickedDifferentEdge:
+                clickedDifferentEdge:bool = selItem and selItem.data(KEY_ROLE) == ROLE_EDGE  and \
+                    (self.onlySelected and selItem != self.onlySelected ) #empty start
+                #if not clickedHandle and clickedDifferentEdge:
+                if clickedDifferentEdge:
                     self.clearSelection()
-                    #For edges, was there only one selected? Clear.
+                    #print("different edge")
+                    #For edges, was there only one selected? Clear, and point to new selection
+                    #TODO: This feels like it duplicates the next section, but ...
                     if self.onlySelected:
                         self.clearEdgeOnly(self.onlySelected)
+                        self.onlySelected = selItem
+                        selItem.edgeLine.setSelected(True)
 
+                #Why set this to selected? Rather handle in NODE and EDGE if's?
                 if selItem:
                     selItem.setSelected(True)
                 selected_items = self.selectedItems()
                 #len is 0 or 1
                 #exactly 1 edge selected
-                if len(selected_items) == 1 and selItem.data(KEY_ROLE) == ROLE_EDGE:
+                #print(f"{len(selected_items)=}")
+                #Add the handles
+                #Remember that VisEdge has it's own mouse handler for listWidget - check overlap/ ...
+                if len(selected_items) == 1 and (selItem.data(KEY_ROLE) == ROLE_EDGE ):
+                    #Clear whatever was previously selected
+                    self.clearSelection()
                     self.clearEdgeOnly(selItem)
+                    #HACK: - this switch from selItem to item is not consistent.
+                    selItem.setSelected(True)
                     item = selected_items[0]
+                    item.isOnlySelected = True
+                    #Let the scene remember, for unsetting
+                    self.onlySelected = item
 
-                    if item.data(KEY_ROLE) == ROLE_EDGE:
-                        item.isOnlySelected = True
-                        #Let the scene remember, for unsetting
-                        self.onlySelected = item
-                        if not item.scB:
-                            item.setZValue(2000) #above nodes
-                            item.scB = controlBox(item.startNode.pos(), item)
-                        if not item.ecB:
-                            item.ecB = controlBox(item.endNode.pos(), item)  
+                    #HACK: force selection to create handles (selection order processing is mangled)
+                    item.edgeLine.setSelected(True)
 
-                #Handle the connectionBox
-                if selItem and selItem.data(KEY_ROLE) == ROLE_CB:
-                    mouseEvent.accept()
-                    self.mouseMode = self.MOVEEDGEEND
-                    #Draw control boxes at either end, start move
-                    self.startMovingEdgeEnd(selItem.parentItem(), selItem)
-                    return #event handled
+                    if not item.stH:
+                        item.setZValue(2000) #move the edge above nodes
+                        # item.stHandle must be the 1st point handle: item.edgeLine._pHandles[0]
+                        #print("Setting stH", end="")
+                        if len(item.edgeLine._pHandles)>0:
+                            item.stH = item.edgeLine._pHandles[0]
+                        else:
+                            print("No handles yet")
+                    if not item.endH:
+                        #print(", endH")
+                        item.endH = item.edgeLine._pHandles[-1]
+
+                if selItem and selItem.data(KEY_ROLE) == ROLE_HANDLE:
+                    #print(f"Handle: {type(selItem)=}")
+                    #if the parent is HS and selItem = _pH[0] or -1, then start moving end of edge
+                    p = selItem.parentItem()
+                    if p.data(KEY_ROLE) == ROLE_POLYLINE and (selItem == p._pHandles[0] or selItem == p._pHandles[-1]):
+                        #mouseEvent.accept()
+                        self.mouseMode = self.MOVEEDGEEND
+                        #print(f"{self.mouseMode=} {selItem.parentItem()=}")
+                        #Start move
+                        #selItem  _Must_ be a handle, and parent must be a visEdge - deal with the polyline inbetween
+                        self.startMovingEdgeEnd(selItem.parentItem().parentItem(), selItem)
+                    else: #tangent or Mid point to move
+                        self.handle = selItem
+                        self.mouseMode = self.MOVEHANDLE
+                        #BUG - DRagging - this stops dragging from an edge, but not having it breaks tangent update values
+                        mouseEvent.accept()
+                        return
+
+                #if we get here, and selected_items >2, we're about to drag
+                if len(selected_items) > 2:
+                    #print("setting mode to DRAGGING")
+                    self.mouseMode = self.DRAGGING
 
         if (mouseEvent.button() == Qt.MouseButton.RightButton):
-            selItem = self.itemAt(mPos,self.views()[0].transform())
-            if selItem:
-                print(f"\n******************\nRC {selItem = }")
-                if selItem.parentItem():
-                    #TODO: Why does this remove selItem from the scene???
-                    print(f"RC {selItem.parentItem() = }")
-            else:
-                # print everything
-                MainWindow.action_DebugPrint(MainWin)
+            mPos = mouseEvent.scenePos()
+            #selItem = self.itemAt(mPos,self.views()[0].transform())
+            selItem = self.selectedItems()
+            # createContextMenu(mouseEvent, listOfTuples option:action)->action??
+            cxMenu = None
+            if len(selItem) == 1:
+                item = selItem[0]
+                
+                if item.data(KEY_ROLE) == ROLE_EDGE:
+                    #Where to do the handles update for these?
+                    cxMenu = [  ("add Point","addPt" ),
+                                ("del Point","delPt" ),
+                                ("Edit Details", lambda: self.mainwindow.showEditEdgeDialog(item))
+                            ]
+                if item.data(KEY_ROLE) == ROLE_NODE:
+                    pass
+            else: #no or >1 selected.
+                cxMenu =[("print",lambda: MainWindow.action_DebugPrint(MainWin))]
+
+            if cxMenu:
+                cxChoice = self.contextMenu(mouseEvent, cxMenu)
+
+                #Adding & deleting points impacts selection, so deal with carefully
+                if cxChoice == "addPt":
+                    item.edgeLine._deleteHandles()
+                    item.edgeLine.addPoint(mPos)
+                    item.edgeLine.setSelected(True)
+
+                elif cxChoice == "delPt":
+                    item.edgeLine.deletePoint(mPos)
+
+                #if a lambda, run it
+                if callable(cxChoice):
+                    cxChoice()
 
         #pass on
         super().mousePressEvent(mouseEvent)
@@ -1078,8 +1428,10 @@ class grScene(QGraphicsScene):
     def mouseMoveEvent(self, mouseEvent):
         mPos = mouseEvent.scenePos()
         #print(f"M: {self.mouseMode} ",end="",flush=True)
-        
-        #Handle hovering
+        delta = mPos - self._lastMousePos
+        self._lastMousePos = mPos 
+
+        #TODO: Handle hovering
 
         if self.mouseMode == self.INSERTNODE:
             #print("moving at :",mouseEvent.scenePos())
@@ -1092,16 +1444,32 @@ class grScene(QGraphicsScene):
             if self.tmpEdgeSt:
                 self.stretchRubberLine(mPos)
                 mouseEvent.accept()
-                #return #handled - don't show a select rectangle.
             
         elif self.mouseMode == self.POINTER:
             #Mostly handled by Qt
-            #print("p" , end ="")
             pass
+        
+        #manually handle click drag (This _could_ be another state, but only used here)
+        #elif self.mouseMode == self.DRAGGING: # and mouseEvent.buttons() & Qt.LeftButton:
+        if self.mouseMode == self.DRAGGING:# and (mouseEvent.buttons() & Qt.LeftButton):
+            #Handle edges with multiple points - update the points
+            sIlist = self.selectedItems()
+            #print(f"->{len(sIlist)}",end="")
+            if len(sIlist) > 2: #high probability of an edge in the mix
+                for item in sIlist:
+                    if item.data(KEY_ROLE) == ROLE_EDGE:
+                        item.edgeLine.moveMidPoints(delta)
+                        #print("e" , end ="")
+            
         elif self.mouseMode == self.MOVEEDGEEND:
             self.MoveEdgeEnd(self.onlySelected,mPos)
             mouseEvent.accept()
-            #return #no rubberband -?? doesn't work?
+            
+        elif self.mouseMode == self.MOVEHANDLE:
+            #print("Move Handle")
+            #Same code as moveEdgeEnd
+            self.handle.setPos(mPos) 
+            
         super().mouseMoveEvent(mouseEvent)
 
     def mouseReleaseEvent(self, mouseEvent):
@@ -1137,14 +1505,62 @@ class grScene(QGraphicsScene):
             return
 
         elif self.mouseMode == self.POINTER:
-            #print("up select at", mouseEvent.scenePos())
-            pass
+            if len(self.selectedItems()) > 0:
+                # print("up select at", mouseEvent.scenePos())
+                #if len(self.selectedItems()) == 2:
+                #    for s in self.selectedItems():
+                #        print(s)
+                #else:
+                #    print(f"{len(self.selectedItems())} items selected")
+                #print(f"{len(self.selectedItems())=}",end = ' ')
+                #for s in self.selectedItems():
+                #    print(type(s),end = ",")
+                #print()
+                pass
             #MainWindow.actionSceneSelectChange(MainWindow.Scene)
         elif self.mouseMode == self.MOVEEDGEEND:
+            #print("Finish moveEdgeEnd")
             self.finishMovingEdgeEnd(self.onlySelected, mPos,mouseEvent)
             self.mouseMode = self.POINTER
-            return
+            mouseEvent.accept()
+            #return
+        elif self.mouseMode == self.MOVEHANDLE:
+            #SHOULD all be handled by Qt?
+            #print("End move handle")
+            self.mouseMode = self.POINTER
+        elif self.mouseMode == self.DRAGGING:
+            #print(f"up: DRAGGING --> POINTER")
+            self.mouseMode = self.POINTER
+
         super().mouseReleaseEvent(mouseEvent)  
+
+    def mouseDoubleClickEvent(self, mouseEvent: QGraphicsSceneMouseEvent) -> None:
+        if mouseEvent.button() == Qt.LeftButton:
+            pos: QPointF = mouseEvent.scenePos()
+            self.mouseMode = self.DOUBLECLICK
+            #print(f"Double-click at {pos}")
+            item = self.pickItemAt(mouseEvent,QSize(HITSIZE,HITSIZE),[ROLE_EDGE,ROLE_NODE])
+            if item and item.data(KEY_ROLE) == ROLE_EDGE:
+                self.clearEdgeOnly(item)
+                #Pass the edit signal to Mainwindow.
+                #print(f"{item.requestEdit.connect=}, {self.mainwindow.showEditEdgeDialog=}")
+                #item.requestEdit.connect(self.mainwindow.showEditEdgeDialog)   #edgeEditRequested.emit)
+                #item.requestEdit.connect(self.edgeEditRequested.emit)
+                #Even this simple test doesn't work
+                #item.requestEdit.connect(self.signalTest)
+                #HACK: Call the dialog directly. Signals would be better
+                self.mainwindow.showEditEdgeDialog(item)
+
+            if item and item.data(KEY_ROLE) == ROLE_NODE:
+                self.mainwindow.showEditNodeDialog(item)
+            
+            self.mouseMode = self.POINTER
+
+            mouseEvent.accept()
+            #super().mouseDoubleClickEvent(mouseEvent)
+
+    def signalTest(self):
+        print("signal sent to scene successfully")
 
     def WheelEvent(self, event):
         #print("wheelevent")
@@ -1163,8 +1579,26 @@ class grScene(QGraphicsScene):
         return None
 
     def deleteItemAndChildren(self,item):
-        #TODO: Refactor to change name, removing 'AndChildren'
+        #print(f" start dIC for {item}")
+        #BUG:DeleteEdge This leaves a the line/ polyline 'in the scene' (but not in scene.getItems()!)
+        #Trying https://pypi.org/project/referrers/ to look for links
+        #1st try overflows the line allocation in VSCodium
+        #import referrers
+        #print(referrers.get_referrer_graph(item))
+
+        #TODO: Make this recursive, deleting leaves first (Python/ C++ memory handling issue - see old code in V00)
+        # Recursively remove and delete children. Action is post-recursion to delete from the bottom up
+        #TODO - why does doing this cause index errors (use b2.grml, multiple select, as test)
+        #for child in item.childItems():
+        cList = item.childItems()
+        for child in cList:
+            #print(f"dIC {child}")
+            self.deleteItemAndChildren( child)
+        
+        #print(f"   now processing dIC for {item}")
         item.suppressItemChange = True
+        #unparent
+        #item.setParentItem(None)
         # Remove from scene
         #if its an edge, tell the nodes ends that the edge is gone
         if item.data(KEY_ROLE) == ROLE_EDGE:
@@ -1178,9 +1612,13 @@ class grScene(QGraphicsScene):
         #    logging.debug(f"{i =}")        
         
         # Register a finalize callback to confirm deletion
-        weakref.finalize(item, self._on_finalize, repr(item))
+        #weakref.finalize(item, self._on_finalize, repr(item))
 
+        item.suppressItemChange = True
         self.removeItem(item)
+        #import referrers
+        #print(referrers.get_referrer_graph(item, max_depth=3))
+        
         #logging.debug("delItem&chld scene items, AFTER remove")
         #for i in self.items():
         #    logging.debug(f"{i =}")
@@ -1215,7 +1653,7 @@ def debug_qgraphicsitem_refs():
             #for ref in refs:
             #    print("   ", ref)
 
-######
+#=======
 # "monkey patch" QListWidget to create data() sorted lists
 # can't properly extend QListWidget 'cos it's setup in the .ui file
 # Courtesy of chatGPT
@@ -1266,8 +1704,8 @@ def findItemRowByIdx(self,idx):
     return None
 QListWidget.findItemRowByIdx = findItemRowByIdx
 
-
 #end monkeypatch    
+#=======
 
 
 #Some global helper functions
@@ -1275,7 +1713,7 @@ class CodeExecDialog(QDialog):
     """Let the user run arbitrary Python code against the model """
     def __init__(self, parent=None, scene=None):
         super().__init__(parent)
-        self.setWindowTitle("Python Code Executor - Experimenal - does not save!")
+        self.setWindowTitle("Python Code Executor - Experimental - does not save!")
         self.resize(600, 400)
         self.setModal(False) 
 
@@ -1286,6 +1724,8 @@ class CodeExecDialog(QDialog):
         inputLabel = QLabel("Python Code ('S' is scene, 'M' is model, 'G' is Graph):")
         self.codeEdit = QTextEdit()
         self.codeEdit.setText("#Examples - No. of Scene items: \nresult = str(len(S.items()))\n" +
+                                "nC = len(G.nodeD)\neC = len(G.edgeD)\n" +
+                                "result += f'\\n Node Count: {nC}, Edge Count {eC}'\n" +
                                 "#Directed or not:\nresult += f'\\n{M.isDigraph == False =}\\n' \n" +
                                 "#Graph Model contents:\nresult += f'{M.getModelItems() =}\\n' \n"+
                                 "#Abstract Graph G:\nresult += f'{G =}'")
@@ -1426,10 +1866,13 @@ class MainWindow(QMainWindow):
         self.ui.listWidget.itemClicked.connect(self.listClick)
         self.ui.listWidget.itemDoubleClicked.connect(self.listDblClicked)
 
-        #Setup the graphicsView, linking model,scene and list
-        self.Scene = grScene(self.model,self.ui.listWidget)
+        #Setup the graphicsView, linking model,scene and list. Scene needs to know the mainwindow to call dialogs, etc
+        self.Scene = grScene(self.model,self.ui.listWidget,self)
         self.Scene.selectionChanged.connect(self.actionSceneSelectChange(self.Scene))
-        
+    
+        self.Scene.edgeEditRequested.connect(self.showEditEdgeDialog)
+        self.Scene.nodeEditRequested.connect(self.showEditNodeDialog)
+
         self.ui.graphicsView.setScene(self.Scene)
         self.ui.graphicsView.setRenderHint(QPainter.Antialiasing)
         self.ui.graphicsView.setDragMode(QGraphicsView.RubberBandDrag)
@@ -1556,9 +1999,25 @@ class MainWindow(QMainWindow):
 
     def listDblClicked(self,item):
         #print("listDblClicked", item.text(), item.index())
-        item.setFlags(item.flags() | Qt.ItemIsEditable)
-        self.ui.listWidget.editItem(item)
+        #item.setFlags(item.flags() | Qt.ItemIsEditable)
+        #self.ui.listWidget.editItem(item)
         #print(f"Editing {item.text() =}, id = {item.data(KEY_INDEX)}")
+
+        #copilot Integration: If the double-clicked item is an edge, open the edit dialog
+        if item.data(KEY_ROLE) == ROLE_EDGE:
+            # Find the corresponding VisEdgeItem in the scene
+            edgeItem = self.Scene.findItemByIdx(item.data(KEY_INDEX))
+            if edgeItem:
+                #TODO: This should be a signal? (but I can't make them work)
+                self.showEditEdgeDialog(edgeItem)
+        elif item.data(KEY_ROLE) == ROLE_NODE:
+            nodeItem = self.Scene.findItemByIdx(item.data(KEY_INDEX))
+            if nodeItem:
+                self.showEditNodeDialog(nodeItem)
+        else: #Not called anymore?
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            self.ui.listWidget.editItem(item)
+
         self.updateSceneText(item)
 
     def updateSceneText(self,item):
@@ -1621,104 +2080,335 @@ class MainWindow(QMainWindow):
         # eg self.onlySelected
         self.Scene.clear()
 
+    def nodeFromXML(self,xNode,newID=False)->VisNodeItem:
+        """ Create a new node from an XML string
+            if newID is True, the item is created with a newID,otherwise, the read value.
+            This is the difference between file load (new items) and edit paste (structure)
+            Returns VisNodeItem
+        """
+        #Use old yEd + load code
+        nodeMetadata = {}
+        nodeMetadataAttributes = {}
+
+        #TODO: type check id
+        if not newID:
+            id = int(xNode.attrib.get("id"))
+        else:
+            id = ''
+        for dataNode in xNode.iter("data"):
+            shapeNode = dataNode.find("ShapeNode")
+            if shapeNode != None:
+                # Geometry information
+                geom = shapeNode.find("Geometry")
+                if geom is not None:
+                    nodeX = float(geom.get("x"))
+                    nodeY = float(geom.get("y"))
+                    #geometry_vars = ["height", "width", "x", "y"]
+
+                nodeLable = shapeNode.find("NodeLabel")
+                if nodeLable is not None:
+                    nodeName = nodeLable.text.strip()
+                    for nodeNameAttribs in nodeLable.iter("metadataAttribute"):
+                        #nodeMetadataAttributes['name'] = {nodeNameAttribs.attrib.get("key"): nodeNameAttribs.attrib.get("value")}
+                        #Deal with Boolean for display (This is why you should use the proper key types!)
+                        if nodeNameAttribs.attrib.get("key") == 'display':
+                            nodeMetadataAttributes['name'] = {'display':nodeNameAttribs.attrib.get("value") == "True"}
+                        else:
+                            nodeMetadataAttributes['name'] = {nodeNameAttribs.attrib.get("key"): nodeNameAttribs.attrib.get("value")}
+
+            #TODO: Add in error processing for corrupt/ odd files
+        # Look for a metadata node
+        for metaEl in xNode.iter("metadata"):
+            metaKey = metaEl.attrib.get("key")
+            nodeMetadata[metaKey] = metaEl.attrib.get("value").strip()
+            for nodeNameAttribs in metaEl.iter("metadataAttribute"):
+                #Deal with Boolean for display (This is why you should use the proper key types!)
+                #TODO: Get the boolean value into the XML
+                if nodeNameAttribs.attrib.get("key") == 'display':
+                    nodeMetadataAttributes[metaKey] = {'display':nodeNameAttribs.attrib.get("value") == "True"}
+                else:
+                    nodeMetadataAttributes[metaKey] = {nodeNameAttribs.attrib.get("key"): nodeNameAttribs.attrib.get("value")}
+
+        newNode =  VisNodeItem(QPointF(nodeX,nodeY),self.model,self.ui.listWidget ,nameP=nodeName, id = id,
+                                metadata=nodeMetadata, metadataAttributes=nodeMetadataAttributes)
+        return newNode
+
+    def edgeFromXML(self,xEdge,newID=False,newStartID=None, newEndID=None)->VisEdgeItem:
+        """ Create a new edge from an XML string
+            if newID is True, the item is created with a newID,otherwise, the read value.
+            This is the difference between file load (new items) and edit paste (structure)
+            newStartID & newEndID also must be overwritten on paste/ structure copy
+            Returns VisEdgeItem
+        """
+        #Use old yEd + load code
+        #print(ET.tostring(xEdge))
+        
+
+        if not newID:
+            #TODO: type check id/ process string IDs
+            id = int(xEdge.attrib.get("id"))
+        else:
+            id = ''
+        
+        #TODO: yEd uses string IDs, not ints :/
+        if newStartID is not None: #Note: Can't use "truthy" here since 0 is a valid option!
+            sItemID = newStartID
+        else:
+            sItemID = int(xEdge.attrib.get("source", None))
+
+        if newEndID is not None:
+            eItemID = newEndID
+        else:
+            eItemID = int(xEdge.attrib.get("target", None))
+
+        sItem = self.Scene.findItemByIdx(sItemID)
+        eItem = self.Scene.findItemByIdx(eItemID)
+        if sItem == None:
+            print(f"WARNING! - Start Item ID {sItemID} not found ")
+        if eItem == None:
+            print(f"WARNING! - End Item ID {eItemID} not found ")
+        #Find the items
+
+        directed = xEdge.attrib.get("directed", '')
+        edgeMetadata = {}
+        edgeMetadataAttributes = {}
+
+        for dataEdge in xEdge.iter("data"):
+            points=[]
+            tangents = []
+            polylineedge = dataEdge.find("PolyLineEdge")
+            polyLineType = STRAIGHT
+            if polylineedge is None:
+                polylineedge = dataEdge.find("QuadCurveEdge")
+                polyLineType = SPLINE 
+            if polylineedge is not None:
+                path = polylineedge.find("Path")
+                if path is not None:
+                    if polyLineType == SPLINE:
+                        #get tangents
+                        startT = path.find("StartTangent")
+                        if startT is not None: 
+                            #Each list entry is a tuple of tuples!
+                            tangents.append( ( QPointF(0,0),
+                                               QPointF(float(startT.attrib.get("x")),
+                                                   float(startT.attrib.get("y")) )
+                                            ) )
+                        
+                    pathPoints = path.findall("Point")
+                    if pathPoints is not None:
+                        points = []
+                        for pt in pathPoints:
+                            points.append( QPointF(float(pt.attrib.get("x")),
+                                            float(pt.attrib.get("y"))) )
+                            #if QuadCurve, #get tangents
+                            if polyLineType == SPLINE:
+                                T = pt.find("Tangent")
+                                if T is not None:
+                                    tangents.append( ( QPointF(float(T.attrib.get("leftx")),
+                                                                float(T.attrib.get("lefty")) ),
+                                                        QPointF(float(T.attrib.get("rightx")),
+                                                                float(T.attrib.get("righty")) )
+                                            ) )
+
+                    if polyLineType == SPLINE:
+                        #get End tangents
+                        endT = path.find("EndTangent")
+                        if endT is not None:
+                            tangents.append( (  QPointF(float(endT.attrib.get("x")),
+                                                float(endT.attrib.get("y")) ),
+                                                QPointF(0,0)
+                                            ) )
+
+                edgeLable = polylineedge.find("EdgeLabel")
+                if edgeLable is not None:
+                    edgeName = edgeLable.text
+                    for edgeNameAttribs in edgeLable.iter("metadataAttribute"):
+                        #Deal with Boolean for display (This is why you should use the proper key types!)
+                        if edgeNameAttribs.attrib.get("key") == 'display':
+                            edgeMetadataAttributes['name'] = {'display':edgeNameAttribs.attrib.get("value") == "True"}
+                        else:
+                            edgeMetadataAttributes['name'] = {edgeNameAttribs.attrib.get("key"): edgeNameAttribs.attrib.get("value")}                        
+
+        #Read any additional metadata
+        for metaEl in xEdge.iter("metadata"):
+            metaKey = metaEl.attrib.get("key")
+            edgeMetadata[metaKey] = metaEl.attrib.get("value")
+            for edgeNameAttribs in metaEl.iter("metadataAttribute"):
+                #Deal with Boolean for display (This is why you should use the proper key types!)
+                if edgeNameAttribs.attrib.get("key") == 'display':
+                    edgeMetadataAttributes[metaKey] = {'display':edgeNameAttribs.attrib.get("value") == "True"}
+                else:
+                    edgeMetadataAttributes[metaKey] = {edgeNameAttribs.attrib.get("key"): edgeNameAttribs.attrib.get("value")}
+
+        #All the data read, create the edge
+        newEdge = VisEdgeItem(self.model,self.ui.listWidget,sItem, eItem, 
+                                directed=directed,  nameP=edgeName, id = id,
+                                polyLineType = polyLineType, points=points,tangents=tangents,
+                                metadata=edgeMetadata, metadataAttributes=edgeMetadataAttributes   )
+
+        return newEdge
+
     def action_FileOpen(self):
-        #print("File Open")
+        """ Read a graphml file in, create all the elements """
         options = QtWidgets.QFileDialog.Options()
         options |= QtWidgets.QFileDialog.DontUseNativeDialog
         fileName, _ = QtWidgets.QFileDialog.getOpenFileName(self, 
             "Load File", dir="", filter ="graphml files(*.graphml);;All Files(*)", options = options)
-        if fileName:  #dialog returns '' on <esc>
-            #Clear the current graph
-            self.action_FileNew()
+        if fileName == '':  #dialog returns '' on <esc>        
+            return
+        #Clear the current graph
+        self.action_FileNew()
 
-            self.fileName = fileName
-            #print(self.fileName)
-            yGr = yEd.Graph()
-            yGr = yGr.from_existing_graph(self.fileName)
-            #Keep a dictionary of yGr id's <-> KEY_INDEX
-            yGrID2Item = {}
-            #print(f"{yGr.nodes = }\n{yGr.edges = }")
-            # Read and set the Graph Digraph status
-            self.model.isDigraph = yGr.directed == 'directed'
+        self.fileName = fileName
 
-            #Add the nodes
-            for yKey,yNode in yGr.nodes.items():
-                #print(f"{yKey =}, {yNode.name =}, {yNode.geom["x"]=}, {yNode.geom["y"]=}")
-                nPos = QPointF(float(yNode.geom["x"]),float(yNode.geom["y"]))
-                #TODO: Read the additional items (URL, Description, Resources? custom_properties don't seem to be implemented)
-                #Create and link in the Qt item:
-                GItem = VisNodeItem(nPos, self.model,self.ui.listWidget,nameP=yNode.name.strip())
-                yGrID2Item[yKey] = GItem.nodeNum
-                self.Scene.addItem(GItem)
-                GItem.setFlag(QGraphicsItem.ItemIsSelectable, True)
-                GItem.setFlag(QGraphicsItem.ItemIsMovable, True)                
+        #Load the .graphml file as a string
+        #Key elements from 
+        #fileReading: yEd xml_to_simple_string()
+        graphStr = ""
+        try:
+            with open(fileName, "r") as graphFile:
+                graphStr = graphFile.read()
 
-            #Add the edges
-            for yKey,yEdge in yGr.edges.items():
-                #print(f"{yKey = } {yEdge.node1.id =}, {yEdge.node2.id =} {yEdge.name =}")
-                sNodeID = yGrID2Item[yEdge.node1.id.strip()]
-                eNodeID = yGrID2Item[yEdge.node2.id.strip()]
-                #print(f"{sNodeID =}, {eNodeID =}")
-                sItem = self.Scene.findItemByIdx(sNodeID)
-                eItem = self.Scene.findItemByIdx(eNodeID)
-                edgeItem = VisEdgeItem(self.model,self.ui.listWidget,sItem, eItem, parent=None, nameP=yEdge.name)
-                #Add to *Scene*
-                self.Scene.addItem(edgeItem)
-                edgeItem.setFlag(QGraphicsItem.ItemIsSelectable, True)
-                edgeItem.setFlag(QGraphicsItem.ItemIsMovable, False)
+        except FileNotFoundError:
+            print(f"Error, file not found: {graphFile}")
+            raise FileNotFoundError(f"Error, file not found: {graphFile}")
 
-            self.setWindowTitle(str(os.path.basename(self.fileName)) + " " + APP_NAME + "[*]")
 
-            self.setZoom(100)
-            zoomToFitWithMargin(self.ui.graphicsView, margin=0.2)
+        # Preprocessing of file for ease of parsing
+        #TODO: Check how this will mess with multiline metadata
+        graphStr = graphStr.replace("\n", " ")  # line returns
+        graphStr = graphStr.replace("\r", " ")  # line returns
+        graphStr = graphStr.replace("\t", " ")  # tabs
+        graphStr = re.sub("<graphml .*?>", "<graphml>", graphStr)  # unneeded schema
+        graphStr = graphStr.replace("> <", "><")  # empty text
+        graphStr = graphStr.replace("y:", "")  # unneeded namespace prefix
+        graphStr = graphStr.replace("xml:", "")  # unneeded namespace prefix
+        graphStr = graphStr.replace("h:", "")  # unneeded namespace prefix
+
+        graphStr = graphStr.replace("yfiles.", "")  # unneeded namespace prefix
+        graphStr = re.sub(" {1,}", " ", graphStr)  # reducing redundant spaces
+
+        # Get major graph node
+        root = ET.fromstring(graphStr)
+
+        graphStr = root.find("graph")
+        if graphStr is not None:
+            # get major graph info
+            graphDir = graphStr.get("edgedefault")
+            self.model.isDirected = graphDir == "directed"
+        else: 
+            self.model.isDirected = ISDIGRAPH 
+
+        #Track the old -> new IDs to deal with string IDs, and hook up edges
+        oldToNewID = {}
+
+        #Nodes
+        for xNode in graphStr.iter("node"):
+            #print(f"FileOpen - nodes: {ET.tostring(xNode)=}")
+            #Handle yEd-style string IDs
+            fileID = xNode.attrib.get("id")
+            try: #is the read ID a valid int- use it
+                id = int(fileID)
+                newID = False
+            except ValueError: #No - generate a new one.
+                newID = True
+
+            GItem = self.nodeFromXML(xNode, newID=newID)
+            #Track it, even if it doesn't change - simplifies the edge code
+            oldToNewID[fileID] = GItem.nodeNum
+            #TODO: Do something meaningful with mismatches
+            #if fileID != GItem.nodeNum:
+            #    print(f"WARNING: node id {fileID=} changed on load")
             
+            self.Scene.addItem(GItem)
+            GItem.setFlag(QGraphicsItem.ItemIsSelectable, True)
+            GItem.setFlag(QGraphicsItem.ItemIsMovable, True)    
+
+        #Edges
+        for xEdge in graphStr.iter("edge"):
+            #Handle yEd-style string IDs
+            fileID = xEdge.attrib.get("id")
+            try: #is the read ID a valid int- use it
+                id = int(fileID)
+                newID = False
+            except ValueError: #No - generate a new one.
+                newID = True
+            
+            sItemID = xEdge.attrib.get("source", None)
+            eItemID = xEdge.attrib.get("target", None)
+            edgeItem = self.edgeFromXML(xEdge, newID=newID, 
+                                            newStartID=oldToNewID[sItemID],
+                                            newEndID = oldToNewID[eItemID])
+
+            #Add to Scene
+            self.Scene.addItem(edgeItem)
+            edgeItem.setFlag(QGraphicsItem.ItemIsSelectable, True)
+            edgeItem.setFlag(QGraphicsItem.ItemIsMovable, False)
+        
+        self.Scene.update()
+
+        self.setWindowTitle(str(os.path.basename(self.fileName)) + " " + APP_NAME + "[*]")
+
+        self.setZoom(100)
+        zoomToFitWithMargin(self.ui.graphicsView, margin=0.2)
+
     def action_FileSave(self):
-        #print("File Save")  
+        """ 
+            Write the graph to a yEd-style graphml file.
+            Heavily based on yEdx code
+        """
         if self.fileName:
-            #NOTE: This code is basically duplicated in action_EditCopy, with changes to suit the clipboard.
-            #Create the saveable yEd form of the graph
-            yGr = yEd.Graph()
 
-            #Include saving self.model.isDigraph
-            #TODO: Consider adding a directed flag to the abstract Graph class's edges?
+                #Generate the graph header info
+            # Creating XML structure in Graphml format
+            # Reference: yEdxFileOnly: construct_graphml
+            # xml = ET.Element("?xml", version="1.0", encoding="UTF-8", standalone="no")
+
+            graphml = ET.Element("graphml", xmlns="http://graphml.graphdrawing.org/xmlns")
+            graphml.set("xmlns:java", "http://www.yworks.com/xml/yfiles-common/1.0/java")
+            graphml.set("xmlns:sys", "http://www.yworks.com/xml/yfiles-common/markup/primitives/2.0")
+            graphml.set("xmlns:x", "http://www.yworks.com/xml/yfiles-common/markup/2.0")
+            graphml.set("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
+            graphml.set("xmlns:y", "http://www.yworks.com/xml/graphml")
+            graphml.set("xmlns:yed", "http://www.yworks.com/xml/yed/3")
+            graphml.set("xmlns:h", "http://www.isijingi.co.za/higraph")
+            graphml.set(
+                "xsi:schemaLocation",
+                "http://graphml.graphdrawing.org/xmlns http://www.yworks.com/xml/schema/graphml/1.1/ygraphml.xsd",
+            )
+
+            # Adding some implementation specific keys for identifying urls, descriptions
+            nodeKey = ET.SubElement(graphml, "key", id="data_node")
+            nodeKey.set("for", "node")
+            nodeKey.set("yfiles.type", "nodegraphics")
+
+            edgeKey = ET.SubElement(graphml, "key", id="data_edge")
+            edgeKey.set("for", "edge")
+            edgeKey.set("yfiles.type", "edgegraphics")
+
+
+            # Graph node containing actual objects
             if self.model.isDigraph:
-                yGr.directed = 'directed'
+                directed = 'directed'
             else:
-                yGr.directed = 'undirected' #yEd semantics are a little different - each edge holds directed info.
+                directed = 'undirected'
 
-            #track the yEd nodes and edges, since it runs its own IDs, and ID can't be overridden
-            yGrNodes = {}
-            yGrEdges = {}
-            #nodes
-            #TODO: Extend this to work for multiple scenes. yED will need work too
-            #  useful for tabbed models later. (where each scene will be a subset of model)
-            for sItem in self.Scene.items():
-                if sItem.data(KEY_ROLE) == ROLE_NODE:
-                    iID = sItem.data(KEY_INDEX)
-                    iName = self.model.itemName(sItem)
-                    iPosX = sItem.pos().x()
-                    iPosY = sItem.pos().y()
-                    #yGrNodes[iID] = yGr.add_node(id=str(iID),name=iName,x=str(iPosX),y=str(iPosY))
-                    yGrNodes[iID] = yGr.add_node(name=iName,x=str(iPosX),y=str(iPosY))
-            #edges
-            for sItem in self.Scene.items():
-                #print(sItem.data(KEY_INDEX),sItem.data(KEY_ROLE))
-                if sItem.data(KEY_ROLE) == ROLE_EDGE:
-                    #print(sItem)
-                    iName = self.model.itemName(sItem)
-                    #Get the s/e ID's.
-                    startItem = yGrNodes[sItem.startNode.data(KEY_INDEX)]
-                    endItem = yGrNodes[sItem.endNode.data(KEY_INDEX)]
-                    #TODO: When we get to hyperedges,we'll need a dict for those too
-                    #Note - yEdfile is ignoring this ID
-                    yGr.add_edge(node1=startItem, node2=endItem, name=iName)
-                    #yGr.add_edge(node1=startItem, node2=endItem)
+            graph = ET.SubElement(graphml, "graph", edgedefault=directed, id="G")
 
-            #print(f"{yGr.nodes =}\n{yGr.edges =}")
-            #TODO: wrap this in a try
-            yGr.persist_graph(self.fileName,overwrite=True)   
-            #TODO: Clear the isModified flag  
-            self.setWindowTitle(str(os.path.basename(self.fileName)) + " " + APP_NAME + "[*]")
+            #Add the nodes & edges
+            for sItem in self.Scene.items():
+                if sItem.data(KEY_ROLE) == ROLE_NODE or sItem.data(KEY_ROLE) == ROLE_EDGE :
+                    graph.append(sItem.toXML(graph))
+
+            #Add the keys for the metadata at graph level
+
+            #Write to file
+            raw_str = ET.tostring(graphml)
+            pretty_str = minidom.parseString(raw_str).toprettyxml()
+            #TODO: Check pathing!
+            with open(self.fileName, "w") as f:
+                f.write(pretty_str)
+
         else:
             self.action_FileSaveAs()
 
@@ -1732,8 +2422,15 @@ class MainWindow(QMainWindow):
         options |= QtWidgets.QFileDialog.DontUseNativeDialog
         fileName, _ = QtWidgets.QFileDialog.getSaveFileName(self, 
             "Save File", dir=self.fileName, filter ="graphml files(*.graphml);;All Files(*)", options = options)
+        
+        #Note: Qt checks for overwrites, etc
         if fileName:  #dialog returns '' on <esc>
-            self.fileName = fileName
+            if fileName[-8:] == ".graphml":
+                self.fileName = fileName
+            else:
+                self.fileName = fileName+".graphml"
+                F
+            self.setWindowTitle(str(os.path.basename(self.fileName)) + " " + APP_NAME + "[*]")
             self.action_FileSave()
                  
     def action_FileClose(self):
@@ -1819,10 +2516,10 @@ class MainWindow(QMainWindow):
         generator.setSize(self.Scene.sceneRect().size().toSize())  #itemsBoundingRect().size().toSize())
 
         #TODO: Why is there a lot of white space at the top left?
-        generator.setTitle("(hi)graph V00Export")
-        #generator.setDescription("An SVG export.")
+        generator.setTitle(f"{APP_NAME} Export")
 
         # Paint the scene into the generator
+        #TODO: Deselect before painting, then reselect (copy from copy bitmap code)
         painter = QPainter(generator)
         self.Scene.render(painter)
         painter.end()
@@ -1837,7 +2534,7 @@ class MainWindow(QMainWindow):
         mimeData = QMimeData()
 
         #Simple Model Text
-        ##################
+        #=================
 
         plainText = ""
         for sItem in selectedItems:
@@ -1848,62 +2545,53 @@ class MainWindow(QMainWindow):
         mimeData.setText(plainText)
 
         #graphml - pastable format
-        #########################
+        #=========================
 
-        # Code copied from action_FileOpen. Use that as the "master" copy.
+        # Code similar to action_FileOpen. Use that as the "master" copy.
         #Positions only updated on PASTE
 
-        yGr = yEd.Graph()
+        graphml = ET.Element("graphml", xmlns="http://graphml.graphdrawing.org/xmlns")
+        graphml.set("xmlns:java", "http://www.yworks.com/xml/yfiles-common/1.0/java")
+        graphml.set("xmlns:sys", "http://www.yworks.com/xml/yfiles-common/markup/primitives/2.0")
+        graphml.set("xmlns:x", "http://www.yworks.com/xml/yfiles-common/markup/2.0")
+        graphml.set("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
+        graphml.set("xmlns:y", "http://www.yworks.com/xml/graphml")
+        graphml.set("xmlns:yed", "http://www.yworks.com/xml/yed/3")
+        graphml.set("xmlns:h", "http://www.isijingi.co.za/higraph")
+        graphml.set(
+            "xsi:schemaLocation",
+            "http://graphml.graphdrawing.org/xmlns http://www.yworks.com/xml/schema/graphml/1.1/ygraphml.xsd",
+        )
 
-        #track the yEd nodes and edges, since it runs its own IDs, and ID can't be overridden
-        yGrNodes = {}
-        yGrEdges = {}
-        #nodes
-        for sItem in selectedItems: #self.Scene.items():
-            if sItem.data(KEY_ROLE) == ROLE_NODE:
-                iID = sItem.data(KEY_INDEX)
-                iName = self.model.itemName(sItem)
-                iPosX = sItem.pos().x()
-                iPosY = sItem.pos().y()
-                yGrNodes[iID] = yGr.add_node(name=iName,x=str(iPosX),y=str(iPosY))
-        #edges
-        for sItem in selectedItems: #self.Scene.items():
-            #print(sItem.data(KEY_INDEX),sItem.data(KEY_ROLE))
+        # Adding some implementation specific keys for identifying urls, descriptions
+        nodeKey = ET.SubElement(graphml, "key", id="data_node")
+        nodeKey.set("for", "node")
+        nodeKey.set("yfiles.type", "nodegraphics")
+
+        edgeKey = ET.SubElement(graphml, "key", id="data_edge")
+        edgeKey.set("for", "edge")
+        edgeKey.set("yfiles.type", "edgegraphics")
+        graph = ET.SubElement(graphml, "graph", id="clipboard")
+
+        #Add the nodes & edges
+        for sItem in selectedItems:
+            if sItem.data(KEY_ROLE) == ROLE_NODE :
+                graph.append(sItem.toXML(graph))
             if sItem.data(KEY_ROLE) == ROLE_EDGE:
-                #print(sItem)
-                iName = self.model.itemName(sItem)
-                #Get the s/e ID's.
-                #Check that all end nodes are copied as well, even if not selected
-                if sItem.startNode.data(KEY_INDEX) not in yGrNodes:
-                    #Force the node in
-                    nItem = sItem.startNode
-                    iID = nItem.data(KEY_INDEX)
-                    iName = self.model.itemName(nItem)
-                    iPosX = nItem.pos().x()
-                    iPosY = nItem.pos().y()
-                    yGrNodes[iID] = yGr.add_node(name=iName,x=str(iPosX),y=str(iPosY))
-                startItem = yGrNodes[sItem.startNode.data(KEY_INDEX)]
-                
-                if sItem.endNode.data(KEY_INDEX) not in yGrNodes:
-                    #Force the node in
-                    nItem = sItem.endNode
-                    iID = nItem.data(KEY_INDEX)
-                    iName = self.model.itemName(nItem)
-                    iPosX = nItem.pos().x()
-                    iPosY = nItem.pos().y()
-                    yGrNodes[iID] = yGr.add_node(name=iName,x=str(iPosX),y=str(iPosY))
-                endItem = yGrNodes[sItem.endNode.data(KEY_INDEX)]
-                #TODO: When we get to hyperedges,we'll need a dict for those too
-                yGr.add_edge(node1=startItem, node2=endItem, name=iName)
+                #TODO: Check the semantics here - does this make sense
+                #only copy edges if all ends are in the selection
+                if sItem.startNode in selectedItems and sItem.endNode in selectedItems:
+                    graph.append(sItem.toXML(graph))
 
-        #yGr now has the selected items - stringify, and paste
-        graphmlData = yGr.stringify_graph()
-        mimeData.setData("application/xml", graphmlData.encode("utf-8"))
+        #graphmlData = yGr.stringify_graph()
+        rawStr = ET.tostring(graphml)
+        #This parse step is not critical, but it does ensure that the XML is correct
+        prettyStr = minidom.parseString(rawStr).toprettyxml()
 
-        # Extract the yEdString->Graph code, and put in Edit>Paste(needing mods for new nodes)
+        mimeData.setData("application/xml", prettyStr.encode("utf-8"))
 
         #Bitmap
-        #######
+        #======
 
         # Compute the bounding rect of all selected items
         boundingRect = selectedItems[0].sceneBoundingRect()
@@ -1958,16 +2646,6 @@ class MainWindow(QMainWindow):
                 child.paint(painter,option,widget=None)
                 painter.restore()
         """
-
-        """
-        #Plan c: use a tempScene - this crashed everythong
-        tempScene = QGraphicsScene()
-        tempScene.setSceneRect(boundingRect)
-        #clones = selectedItems  #copy.deepcopy(selectedItems) #VisNodeItem cannot be deepcopied :/
-        for c in selectedItems:
-            tempScene.addItem(c)
-        tempScene.render(painter)
-        """
         painter.end()
 
         #Reselect
@@ -1990,62 +2668,76 @@ class MainWindow(QMainWindow):
 
     def action_EditPaste(self):
         #print("Edit>Paste")
-        # Extract the yEdString->Graph code, and put in Edit>Paste(needing mods for new nodes)
+        # Extract the graphML->Graph code, and put in Edit>Paste(needing mods for new nodes)
         # The newly pasted items will be selected, to make them easy to move
 
         self.Scene.clearSelection()
+        if self.Scene.onlySelected:
+            self.Scene.clearEdgeOnly()
 
         clipboard = QGuiApplication.clipboard()
         mimeData = clipboard.mimeData()
 
         # Check and extract XML if available
         if mimeData.hasFormat("application/xml"):
-            xml_bytes = mimeData.data("application/xml")  # returns QByteArray
-            xml_string = bytes(xml_bytes).decode("utf-8")
+            xmlBytes = mimeData.data("application/xml")  # returns QByteArray
+            graphStr = bytes(xmlBytes).decode("utf-8")
         else:
             return #Nothing readable on the clipboard
 
-        #print(xml_string)
-        #Now add the found items to the model. Based on File>Open
-        yGrID2Item = {}
-        yGr = yEd.Graph()
-        yGr= yGr.from_XML_string(xml_string)
-        for yKey,yNode in yGr.nodes.items():
-            #print(f"{yKey =}, {yNode.name =}, {yNode.geom["x"]=}, {yNode.geom["y"]=}")
-            nPos = QPointF(float(yNode.geom["x"]) + PASTE_OFFSET,float(yNode.geom["y"]) + PASTE_OFFSET)
-            #TODO: Read the additional items (URL, Description, Resources? custom_properties don't seem to be implemented)
-            #Create and link in the Qt item:
-            GItem = VisNodeItem(nPos, self.model,self.ui.listWidget,nameP=yNode.name.strip())
-            yGrID2Item[yKey] = GItem.nodeNum
+        # Preprocessing of string for ease of parsing
+        #TODO: Check how this will mess with multiline metadata
+        graphStr = graphStr.replace("\n", " ")  # line returns
+        graphStr = graphStr.replace("\r", " ")  # line returns
+        graphStr = graphStr.replace("\t", " ")  # tabs
+        graphStr = re.sub("<graphml .*?>", "<graphml>", graphStr)  # unneeded schema
+        graphStr = graphStr.replace("> <", "><")  # empty text
+        graphStr = graphStr.replace("y:", "")  # unneeded namespace prefix
+        graphStr = graphStr.replace("xml:", "")  # unneeded namespace prefix
+        graphStr = graphStr.replace("h:", "")  # unneeded namespace prefix
+
+        graphStr = graphStr.replace("yfiles.", "")  # unneeded namespace prefix
+        graphStr = re.sub(" {1,}", " ", graphStr)  # reducing redundant spaces
+
+        # Get major graph node
+        root = ET.fromstring(graphStr)
+
+        graphStr = root.find("graph")
+
+        #Track the old -> new IDs to hook up edges
+        oldToNewID = {}
+        for xNode in graphStr.iter("node"):
+            #print(f"FileOpen - nodes: {ET.tostring(xNode)=}")
+            GItem = self.nodeFromXML(xNode, newID=True)
+            oldToNewID[int(xNode.attrib.get("id"))] = GItem.nodeNum
+
+            #Bump the pasted items over by PASTE_OFFSET
+            GItem.moveBy(PASTE_OFFSET,PASTE_OFFSET)
+            
             self.Scene.addItem(GItem)
             GItem.setFlag(QGraphicsItem.ItemIsSelectable, True)
-            GItem.setFlag(QGraphicsItem.ItemIsMovable, True)  
-            GItem.setSelected(True)  
-        for yKey,yEdge in yGr.edges.items():
-            #print(f"{yKey = } {yEdge.node1.id =}, {yEdge.node2.id =} {yEdge.name =}")
-            sNodeID = yGrID2Item[yEdge.node1.id.strip()]
-            eNodeID = yGrID2Item[yEdge.node2.id.strip()]
-            #print(f"{sNodeID =}, {eNodeID =}")
-            sItem = self.Scene.findItemByIdx(sNodeID)
-            eItem = self.Scene.findItemByIdx(eNodeID)
-            edgeItem = VisEdgeItem(self.model,self.ui.listWidget,sItem, eItem, parent=None, nameP=yEdge.name)
-            #Add to *Scene*
+            GItem.setFlag(QGraphicsItem.ItemIsMovable, True) 
+            GItem.setSelected(True)   
+
+        #Edges
+        for xEdge in graphStr.iter("edge"):
+            sItemID = int(xEdge.attrib.get("source", None))
+            eItemID = int(xEdge.attrib.get("target", None))
+
+            edgeItem = self.edgeFromXML(xEdge, newID=True, 
+                                            newStartID=oldToNewID[sItemID],
+                                            newEndID = oldToNewID[eItemID])
+            #Bump any polyline points over
+            for pt in edgeItem.edgeLine._p:
+                pt += QPointF(PASTE_OFFSET,PASTE_OFFSET)
+
+            #Add to Scene
             self.Scene.addItem(edgeItem)
             edgeItem.setFlag(QGraphicsItem.ItemIsSelectable, True)
             edgeItem.setFlag(QGraphicsItem.ItemIsMovable, False)
-            GItem.setSelected(True)
-
-
-        """
-        #Debug helper
-        selected_items = self.Scene.selectedItems()
-        if selected_items:
-            print("Selected items:")
-            for item in selected_items:
-                print("  ", item)
-        else:
-            print("No items selected.")
-        """
+            edgeItem.setSelected(True)
+        
+        self.Scene.update()
 
     #Some helper functions for deletion
 
@@ -2053,7 +2745,6 @@ class MainWindow(QMainWindow):
         """ all the calls to delete an edge"""
         
         #delete from model
-        ###
         self.model.delEdge(delIdx)
         #Delete from LWscene updat
         delRow = self.ui.listWidget.findItemRowByIdx(delIdx)
@@ -2073,6 +2764,9 @@ class MainWindow(QMainWindow):
         if eList:
             for e in eList:
                 self.delEdge(e)
+
+        #Delete from Scene first, since there are complex deps to other parts which get in a knot
+        self.Scene.deleteItemAndChildren(self.Scene.findItemByIdx(delIdx))
         #delete from model
         self.model.delNode(delIdx)
         #Delete from LW
@@ -2080,7 +2774,7 @@ class MainWindow(QMainWindow):
         delItem = self.ui.listWidget.takeItem(delRow)
         del delItem
         #Delete from Scene
-        self.Scene.deleteItemAndChildren(self.Scene.findItemByIdx(delIdx))
+        #self.Scene.deleteItemAndChildren(self.Scene.findItemByIdx(delIdx))
 
     def action_EditDelete(self):
         #print("Edit>Delete")
@@ -2122,6 +2816,8 @@ class MainWindow(QMainWindow):
 
     def action_EditSelectNone(self):
         #print("Edit>SelectNone")
+        if self.Scene.onlySelected: 
+            self.Scene.clearEdgeOnly(self.Scene.onlySelected)
         self.Scene.clearSelection()
 
     def action_EditZoomIn(self):
@@ -2140,6 +2836,23 @@ class MainWindow(QMainWindow):
         dlg = action_CreditsDlg(self)
         dlg.exec()
 
+    def showEditEdgeDialog(self, visEdgeItem):
+        """
+        copilot Show the EditVisEdgeItemDialog for the given VisEdgeItem and apply changes.
+        """
+        dlg = EditVisEdgeItemDialog(visEdgeItem, parent=self)
+        if dlg.exec() == dlg.accepted:
+            # Attributes are already updated by the dialog's accept method
+            self.Scene.update()
+            self.ui.listWidget.repaint()
+
+    def showEditNodeDialog(self, visNodeItem):
+        dlg = EditVisNodeItemDialog(visNodeItem, parent=self)
+        if dlg.exec() == dlg.accepted:
+            # Attributes are already updated by the dialog's accept method
+            self.Scene.update()
+            self.ui.listWidget.repaint()
+
 
 #Dialogs called by mainwindow
 class action_Aboutdlg(QDialog):
@@ -2155,6 +2868,7 @@ class action_CreditsDlg(QDialog):
 
         self.uidlgCred = Ui_dlgCredits()
         self.uidlgCred.setupUi(self)
+
 
 #--------------------------------------------
 #import cProfile

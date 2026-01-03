@@ -11,19 +11,32 @@ Nodes as sets will be added later - inclusion is easier than n-ary edges.
 
 #from typing import ClassVar
 import copy
+from  HGConstants import *
 
 class Graph:
     """ a set of nodes and edges"""
     
     #A graph-global ID. Allows for hyperedges (edges start XOR end on edges)
     nextID:int = 0
+    #A set of used IDs. Allows loading of files with existing IDs
+    #TODO: Clear on FileNew
+    IDsUsed = {}
     
     # a container class of nodes. Mostly exists as a place to hold metadata, and some optimisations 
     class node():
       
-        def __init__(self,metadata=None):
-            self.nodeID = Graph.nextID
-            Graph.nextID += 1
+        def __init__(self,metadata=None,id=None):
+            #Check for unique ID
+            if id:
+                if not id in Graph.IDsUsed:
+                    self.nodeID = id
+                    Graph.IDsUsed.add(id)
+            else:
+                while Graph.nextID in Graph.IDsUsed:
+                    Graph.nextID += 1
+                self.nodeID = Graph.nextID
+                Graph.nextID += 1
+
             self.metadata = metadata
             self.startsEdges = []  
             self.endsEdges = []
@@ -47,11 +60,20 @@ class Graph:
     
     class edge():
        
-        def __init__(self,start:int,end:int,metadata:dict|None=None):
+        def __init__(self,start:int,end:int,metadata:dict|None=None,id=None):
             """new edge, must have start = nodeID or tuple, end = nodeID, optional metadata   """
             #TODO: For re-creating from file/ paste, ID will need to be a param?
-            self.edgeID = Graph.nextID
-            Graph.nextID += 1
+             #Check for unique ID
+            if id:
+                if not id in Graph.IDsUsed:
+                    self.edgeID = id
+                    Graph.IDsUsed.add(id)
+            else:
+                while Graph.nextID in Graph.IDsUsed:
+                    Graph.nextID += 1
+                self.edgeID = Graph.nextID
+                Graph.nextID += 1           
+
             self.metadata = metadata
             self.startNodes = [] 
             self.endNodes = []
@@ -76,23 +98,30 @@ class Graph:
         #TODO: can this be one list, with a flag indicating the type?
         self.nodeD = {}  #Dictionary of nodes
         self.edgeD = {}  #Dictionary of edges
+        Graph.IDsUsed = set()
+        #Store default edge type. CAn be overridden on individual edges
+        #TODO: Make this a per-model editable param.
+        self.isDirected = ISDIGRAPH
+        #TODO: Add in the global dictionary of metadata attribs the graph holds. Node vs Edge metadata?
+        # adding metadata to items must update this list
+        self.metadataKeys = {}
 
     def __repr__(self):
         return(f"nodes:\n{self.nodeD}\nedges:\n{self.edgeD}")
     
     __str__ = __repr__
     
-    def addNode(self,name=None)->int:
-        n = self.node({"name":name})
-        self.nodeD.update({n.nodeID:n})
+    def addNode(self,name=None, id=None)->int: 
+        n = self.node({"name" : name},id=id)
+        self.nodeD.update({n.nodeID : n})
         return n.nodeID
         
-    def addEdge(self,start,end,name=None)->int|None:
+    def addEdge(self,start,end,name=None,id=None)->int|None:
 
         #standard n-n edge
         if start in self.nodeD and end in self.nodeD:
             #create a new one
-            e = self.edge(start,end,{"name":name})
+            e = self.edge(start,end,{"name":name},id=id)
             
             #Tell the nodes they have new edges
             #TODO: `nodeD` is a misnomer, since edges can be start/ end items too.
@@ -163,6 +192,7 @@ class Graph:
                 else: #remove from the endlist
                     self.edgeD[endEdge].endNodes.remove(nodeID)
             #delete the node
+            Graph.IDsUsed.remove(nodeID)
             self.nodeD.pop(nodeID)
         else:
             print(f"*** Error Can't delete {delNode =} - does not exist")
