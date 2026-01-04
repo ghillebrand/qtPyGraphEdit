@@ -2429,7 +2429,6 @@ class MainWindow(QMainWindow):
                 self.fileName = fileName
             else:
                 self.fileName = fileName+".graphml"
-                F
             self.setWindowTitle(str(os.path.basename(self.fileName)) + " " + APP_NAME + "[*]")
             self.action_FileSave()
                  
