@@ -210,7 +210,7 @@ class EditVisEdgeItemDialog(QDialog):
         isDirected = self.directedCheckbox.isChecked()
         self.visEdgeItem.setDirected(isDirected)
 
-        #Linetype
+        #Linetype - index matches STRAIGHT==0 and SPLINE==1
         lineType = self.edgeTypeCombo.currentIndex()
         self.visEdgeItem.setPolylineType(lineType)
 

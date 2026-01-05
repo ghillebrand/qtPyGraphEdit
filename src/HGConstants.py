@@ -12,7 +12,7 @@ DISPLAY_NAME_BY_DEFAULT = True
 #Constants for edge type
 STRAIGHT = 0
 SPLINE = 1
-DEFAULT_EDGE = STRAIGHT #SPLINE #STRAIGHT 
+DEFAULT_EDGE = SPLINE #SPLINE #STRAIGHT 
 
 #Model level default for edges
 ISDIGRAPH = True
@@ -32,6 +32,8 @@ KEY_ROLE = Qt.UserRole + 2
 #TODO: Can ListWidgets take any type for roles? (Items can)
 ROLE_NODE = QListWidgetItem.ItemType.UserType + 1
 ROLE_EDGE = QListWidgetItem.ItemType.UserType + 2
+
 #Handles for connecting/ moving
 ROLE_HANDLE = QListWidgetItem.ItemType.UserType + 3
 ROLE_POLYLINE = QListWidgetItem.ItemType.UserType + 4
+ROLE_DUMMYNODE = QListWidgetItem.ItemType.UserType + 5
