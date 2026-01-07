@@ -20,7 +20,7 @@ class Graph:
     nextID:int = 0
     #A set of used IDs. Allows loading of files with existing IDs
     #TODO: Clear on FileNew
-    IDsUsed = {}
+    IDsUsed = set()
     
     # a container class of nodes. Mostly exists as a place to hold metadata, and some optimisations 
     class node():
@@ -35,6 +35,7 @@ class Graph:
                 while Graph.nextID in Graph.IDsUsed:
                     Graph.nextID += 1
                 self.nodeID = Graph.nextID
+                Graph.IDsUsed.add(self.nodeID)
                 Graph.nextID += 1
 
             self.metadata = metadata
@@ -72,6 +73,7 @@ class Graph:
                 while Graph.nextID in Graph.IDsUsed:
                     Graph.nextID += 1
                 self.edgeID = Graph.nextID
+                Graph.IDsUsed.add(self.edgeID)
                 Graph.nextID += 1           
 
             self.metadata = metadata
@@ -209,7 +211,7 @@ class Graph:
                 self.nodeD[StNode].startsEdges.remove(edgeID)
             for EndNode in e.endNodes:
                 self.nodeD[EndNode].endsEdges.remove(edgeID)
-            
+            Graph.IDsUsed.remove(edgeID)
             self.edgeD.pop(edgeID)
         else:
             print(f"***Error deleting edge <{edgeID}> - does not exist")
