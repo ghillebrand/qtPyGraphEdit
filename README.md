@@ -50,13 +50,15 @@ The editing dialog. It is simple and functional - I'm still working out how to u
 ## TODO:
 
 ### V0.2
-- Hyperedges - n-ended edges. 
-            
+I have revised my road map. I looked at the work to implement hyperedges, and decided that I will get more motivation from having nodes-as-sets, or `blobs`, as Harel calls them. So hyperedges have moved out to the next iteration. Refactoring is hard!
+- Higraphs - nodes become sets. This will likely be strictly heirarchical sets (ie no set intersections/ overlaps)
+
 ### V0.3
-- Multiple tabs - editable views of different subsets of the master Graph model 
+Hyperedges - n-ended edges. 
 
 ### V0.4
-- Higraphs - nodes become sets. This will likely be strictly heirarchical sets (ie no set intersections/ overlaps)
+- Multiple tabs - editable views of different subsets of the master Graph model 
+
 
 ### V0.5
 - Overlapping sets.
